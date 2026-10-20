@@ -29,6 +29,24 @@ pub(crate) async fn run_doctor(
 }
 
 fn run_doctor_inner_cmd(app: &tauri::AppHandle) -> Result<String, String> {
+    // `scripts/doctor.sh` 是 macOS/Linux 的诊断脚本（zsh + lsof/ps）。Windows 上没有
+    // 等价脚本：返回可读的说明，而不是让用户看到一个启动 shell 失败的错误。
+    #[cfg(windows)]
+    {
+        let _ = app;
+        return Err(format!(
+            "诊断脚本（scripts/doctor.sh）目前只在 macOS / Linux 提供。Windows 请直接查看日志目录：{}",
+            config::default_dir().join("logs").display()
+        ));
+    }
+    #[cfg(not(windows))]
+    run_doctor_with_root(app, None)
+}
+
+fn run_doctor_with_root(
+    app: &tauri::AppHandle,
+    _unused: Option<()>,
+) -> Result<String, String> {
     let root = asset_root(app).ok_or("找不到 scripts/doctor.sh（打包资源或仓库根均未命中）。")?;
     let cfg = doctor_config_from(&config::default_dir())?;
     let doctor = root.join("scripts/doctor.sh");
@@ -140,10 +158,11 @@ pub(crate) fn report_bug() -> Result<(), String> {
 pub(crate) fn open_logs() -> Result<(), String> {
     let dir = config::default_dir().join("logs");
     let _ = std::fs::create_dir_all(&dir);
-    Command::new("open")
-        .arg(&dir)
-        .status()
-        .map_err(|e| format!("打开日志目录失败：{e}"))?;
+    #[cfg(windows)]
+    let status = Command::new("explorer").arg(&dir).status();
+    #[cfg(not(windows))]
+    let status = Command::new("open").arg(&dir).status();
+    status.map_err(|e| format!("打开日志目录失败：{e}"))?;
     Ok(())
 }
 

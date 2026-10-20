@@ -139,6 +139,45 @@ CSSwitch 当前聚焦于安全地把外部 Skill 接入隔离 Science，而不�
 - 官方 Claude 模式会停止第三方代理链路，再打开真实 Science。
 - CSSwitch 不下载或自动升级 Claude Science；新启动会优先采用本机官方 updater 已下载并通过本地身份校验的 runtime snapshot，否则使用当前安装的官方 App。
 
+## 功能现状（Windows x64）
+
+Windows 版与 macOS 版共用同一套源码与提交历史，但**可用范围不同**。下面按“可验证程度”分三档，不把未验证的东西写成已支持。
+
+### ✅ 已实现并实测验证
+
+| 功能 | 说明 | 验证方式 |
+| --- | --- | --- |
+| 一键开始（第三方模型） | 本地 Gateway → 虚拟登录 → 原生启动隔离 Science → 健康 + 监听 PID + 镜像路径三重身份校验 → 打开浏览器 | `test\win-oneclick-e2e.ps1`（真实跑通） |
+| 官方 Claude 模式 | 直接启动选定/已安装的 `claude-science.exe`，抹掉 `ANTHROPIC_*` | 手工 |
+| 停止全部 / 状态 / 重新打开 | 先走 Science CLI，再只对已证明身份的 PID 发信号；端口真关闭才算成功 | `test\win-e2e.ps1`（18/18） |
+| Provider 与模型 | 内置 DeepSeek / 通义千问 / 智谱 GLM / 小米 MiMo / 硅基流动 / Kimi / MiniMax / OpenRouter；自定义 Anthropic Messages、OpenAI Chat、OpenAI Responses 端点；质量/均衡/快速/Fable 角色映射 | `win-e2e.ps1` 验证 Gateway→上游→模型名透传；其余与 macOS 同源 |
+| Claude Science 程序定位 | 自动发现（`%LOCALAPPDATA%\Programs\ClaudeScience` 等）+「设置 → Claude Science 程序」文件选择器（PE 格式/大小/`--version` 校验后才记住） | `cargo test --lib` + 手工 |
+| 隔离沙箱 | 独立 `HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA`/`TEMP` + 独立 data-dir；真实 `%USERPROFILE%\.claude-science` 不被读写 | `win-e2e.ps1` 断言前后文件数/字节数一致 |
+| 虚拟登录（不碰真实账号） | 写入明文 `encryption.key` + `.oauth-tokens/*.enc`；Windows 版 Science 会自行迁移进 DPAPI 并保留明文 fallback | `platform_win_tests::virtual_login_forge_roundtrips_on_windows` |
+| Windows 沙箱自愈 | 检测到 `claude-science-mcp` 未就绪时，自动跑 `claude-science sandbox doctor` 并给 conda 环境补容器 SID 读/执行权限 | `~/.csswitch/logs/sandbox-doctor.log` |
+| 配置与迁移 | `%USERPROFILE%\.csswitch\config.json`（schema v4）；v1→v4 迁移；早期版本误写到“当前目录”的配置会自动搬过来 | `cargo test --lib` |
+| 日志与错误可读性 | `logs\` 下 science / proxy / operation / sandbox-doctor；“打开日志”在 Windows 用资源管理器；预检失败会给出**原因 + 已检查路径** | 手工 |
+
+### ⚠️ 代码与 macOS 同源，Windows 尚未真机验收
+
+- **Codex 实验入口**：浏览器登录、账号动态模型目录、网络路线（默认关闭）。
+- **Skill 页面读取 / 本地包导入**：`list_installed_skills`、`install_local_skill_package` 本身不含 POSIX 调用，但没有在 Windows 上跑完整场景。
+- **模型目录实时发现**（`/v1/models`）与自定义端点探测。
+
+### ❌ 未实现 / 明确不支持（Windows）
+
+| 项 | 现状 |
+| --- | --- |
+| Skill 的 GitHub 安装与 OPERON attach/detach 全链路 | 不提供。依赖 POSIX `openat` 原子 store；相关内部模块（`skill_manager/*`）当前未接入构建 |
+| 复用系统 SSH 配置 | 不支持。win32 的 Science 不读 `~/.ssh/config` 入口；打开开关会得到明确报错 |
+| 多份历史 org 的选择恢复 | 不支持。会要求先清理沙箱 data-dir |
+| authority snapshot 回滚 | 简化为一条启动 journal：`serve` 之后失败会报 `environment_uncertain` 并要求人工确认，不做“看起来干净”的回滚 |
+| 诊断脚本 `scripts/doctor.sh` | macOS/Linux 专用（zsh + lsof/ps）；Windows 上按钮会提示不支持并指向日志目录 |
+| 安装器（NSIS/MSI） | 未构建（需联网下载 NSIS）；便携包功能等价 |
+| macOS 专属校验 | 不适用：Mach-O magic、`codesign`/Team ID 在 Windows 上没有等价物。Windows 用 **PE 格式 + 大小界 + SHA-256 快照绑定**，不声称 Authenticode 来源证明 |
+
+> 细节、平台原语替换表与手工验收步骤见 [docs/operations/windows.md](docs/operations/windows.md)。
+
 ## 当前边界
 
 - 公开桌面包：macOS Apple Silicon（dmg）与 Windows x64（便携 zip）。Windows 上 Skill/MCP 管理、系统 SSH 配置复用与多份历史 org 恢复暂不支持，会明确报错而不是降级静默执行。
