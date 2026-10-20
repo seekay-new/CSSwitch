@@ -1102,12 +1102,47 @@ fn default_dir_from_home(home: &Path) -> PathBuf {
 /// 构建变体固定的配置目录。正式构建为 `$HOME/.csswitch`，Acceptance 为
 /// `$HOME/.csswitch-acceptance`；两者不会因 Finder 使用同一个 HOME 而互相迁移配置。
 pub fn default_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // POSIX 用 `HOME`；Windows 通常没有 `HOME`，只有 `USERPROFILE`。
+    // 早期 Windows 移植版本在这里回退到 `"."`，导致配置被写到进程当前目录
+    // （例如双击便携包时写到包内 `.csswitch/`）。现在统一走平台家目录。
+    let home = crate::platform::real_user_home().unwrap_or_else(|| PathBuf::from("."));
     default_dir_from_home(&home)
 }
 
+/// 一次性迁移：把早期 Windows 构建误写到「进程当前目录」的配置搬到
+/// 真正的 `%USERPROFILE%\.csswitch`。只在目标不存在时复制，绝不删除源。
+pub(crate) fn migrate_legacy_cwd_config_once() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    migrate_legacy_config_from(&cwd.join(".csswitch"), &default_dir());
+}
+
+/// 可测的纯形式：把 `legacy` 中的配置复制到 `target`。
+/// 返回是否真的发生了迁移；只复制、不删除、不覆盖已有目标。
+pub(crate) fn migrate_legacy_config_from(legacy: &Path, target: &Path) -> bool {
+    if !legacy.join("config.json").is_file() || target.join("config.json").is_file() {
+        return false;
+    }
+    if std::fs::create_dir_all(target).is_err() {
+        return false;
+    }
+    let mut migrated = false;
+    for name in [
+        "config.json",
+        "science-bin.v1.json",
+        "pending-authority-cleanup.v1.json",
+    ] {
+        let source = legacy.join(name);
+        if source.is_file() && !target.join(name).exists() && std::fs::copy(&source, target.join(name)).is_ok() {
+            migrated = true;
+        }
+    }
+    migrated
+}
 pub(crate) fn read_pending_authority_cleanup_manifest(dir: &Path) -> io::Result<Option<Vec<u8>>> {
     let access = config_access();
     ensure_config_access_open(&access)?;

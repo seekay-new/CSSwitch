@@ -413,12 +413,30 @@ fn spawn_science_daemon(
         .status()
         .map_err(|error| format!("启动 Science 失败：{error}"))?;
     if !status.success() {
-        let tail = crate::runtime::system::tail_file(&log_path, 600);
+        let tail = crate::runtime::system::tail_file(&log_path, 2400);
         let redacted = crate::runtime::system::redact(&tail, proxy_url);
+        // Science 的失败原因往往埋在进度输出后面（例如 “port 8990 is busy”）；
+        // 先挑出像原因的几行，再退化为最后几行。
+        let focus: Vec<&str> = redacted
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                ["error", "busy", "failed", "refus", "denied", "sandbox", "admin"]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+            })
+            .rev()
+            .take(4)
+            .collect();
+        let detail = if focus.is_empty() {
+            redacted.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+        } else {
+            focus.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        };
         return Err(format!(
-            "Science 启动命令非零退出（{:?}）。日志尾部：{}",
+            "Science 启动命令非零退出（{:?}）。关键日志：{}",
             status.code(),
-            redacted
+            detail
         ));
     }
     Ok(())
@@ -430,19 +448,30 @@ fn wait_for_healthy_launch(
     runtime: &ScienceRuntimeIdentity,
 ) -> Result<ScienceManagedLaunchToken, String> {
     let deadline = Instant::now() + HEALTH_TIMEOUT;
+    let mut identity_deadline: Option<Instant> = None;
+    let mut last_identity_error = String::new();
     loop {
         if proc::http_health(port, None, 400) {
             match record_managed_science_launch(port, runtime) {
                 Ok(token) => return Ok(token),
                 Err(error) => {
-                    if Instant::now() >= deadline {
-                        return Err(format!("Science 已监听 {port}，但身份校验失败：{}", error.message()));
+                    last_identity_error = error.message().to_string();
+                    // 健康但身份长期不成立 = 真的不对劲（不是还在启动），快速失败。
+                    let first = *identity_deadline.get_or_insert_with(Instant::now);
+                    if first.elapsed() >= Duration::from_secs(8) {
+                        return Err(format!(
+                            "Science 已在端口 {port} 提供服务，但身份校验持续失败：{last_identity_error}"
+                        ));
                     }
                 }
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!("等待 Science 在端口 {port} 就绪超时"));
+            return Err(if last_identity_error.is_empty() {
+                format!("等待 Science 在端口 {port} 就绪超时")
+            } else {
+                format!("等待 Science 在端口 {port} 就绪超时；最后一次身份校验失败：{last_identity_error}")
+            });
         }
         std::thread::sleep(Duration::from_millis(200));
     }

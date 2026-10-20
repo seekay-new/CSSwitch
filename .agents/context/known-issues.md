@@ -38,7 +38,8 @@
 
 ## Windows x64（移植）
 
-- 当前证据边界：`cargo test --lib`（129 passed / 5 ignored，含 Windows 平台原语、配置往返、虚拟登录 forge 往返）与 `test/win-e2e.ps1`（18/18：gateway→上游→模型透传、Science 启动/健康/status、端口→PID→镜像身份、隔离、停止）。**桌面 UI 的点击组合路径尚未自动化**，需按 `docs/operations/windows.md` 第 5 节手工验收一次。
+- 当前证据边界：`cargo test --lib`（131 passed / 7 ignored，含 Windows 平台原语、配置往返、迁移、虚拟登录 forge 往返）与两个端到端脚本：`test/win-e2e.ps1`（18/18：gateway→上游→模型透传、Science 启动/健康/status、端口→PID→镜像身份、隔离、停止）与 `test/win-oneclick-e2e.ps1`（真实 `one_click_login`：代理→虚拟登录→启动→身份校验→stop）。桌面 UI 的**点击**流程仍需人工验收一次（`docs/operations/windows.md` 第 5 节）。
+- 已修复的 Windows 专属缺陷（均由上面的端到端测试捕获）：可执行位判定依赖 POSIX `mode & 0o111`；`canonicalize()` 的 `\\?\` verbatim 前缀与保存路径不等；`File::open(目录).sync_all()` 在 Windows 必失败；`Permissions::mode()` 返回 `0o644` 导致“私有文件”判定不成立；`config::default_dir()` 仅认 `HOME`（Windows 通常无 `HOME`，配置会落到进程当前目录）。
 - 未移植（明确报错，不静默降级）：Skill/MCP 管理（依赖 POSIX `openat` 原子 store）、系统 SSH 配置复用、多份历史 org 选择。
 - authority snapshot 回滚在 Windows 上简化为一条启动 journal：`serve` 之后失败会报 `environment_uncertain` 并要求人工确认，不做“看起来干净”的回滚。
 - Windows 上没有 POSIX 的 group/world 权限位，`MetadataExt::dev/ino` 也取不到（std 的 `windows_by_handle` 未稳定）。因此“私有路径”判定改为 ACL owner SID + reparse point 检查；真实的文件身份绑定走 `platform::file_identity`。这一边界比 macOS 的 openat 方案弱（检查与打开之间存在极小窗口），已在代码与文档中写明。

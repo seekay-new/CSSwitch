@@ -2540,9 +2540,11 @@ async function oneClick() {
       binStatus && !binStatus.found && binStatus.platform !== "macos"
         ? "（未找到 Claude Science 程序：请到「设置」页的 Claude Science 程序卡片中指定 exe 路径。）"
         : "";
+    const reason = preflight && preflight.reason ? "原因：" + preflight.reason + "。" : "";
+    const checked = preflight && preflight.checked_path ? " 已检查：" + preflight.checked_path : "";
     setMsg(preflight && preflight.status === "cached_choice_required"
       ? "Claude Science App 不可用或未通过预检。请选择是否仅本次使用已确认版本的缓存。"
-      : "Claude Science App 不可用或未通过预检，且没有可安全启动的缓存版本。" + missingHint, "err");
+      : "Claude Science App 不可用或未通过预检，且没有可安全启动的缓存版本。" + reason + checked + missingHint, "err");
   } catch (e) {
     setMsg("Science 运行环境检查失败：" + e, "err");
   } finally {

@@ -61,7 +61,18 @@ foreach ($pair in @(@("desktop.exe", $appExe), @("csswitch-gateway.exe", $gatewa
 
 $name = "CSSwitch_${version}_x64-win-portable"
 $dest = Join-Path $OutRoot $name
-if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+
+# 安全护栏：绝不删掉用户数据。旧版本曾直接把整个输出目录 Remove-Item，
+# 而用户双击便携包时 CSSwitch 会把数据写在同一目录的 `.csswitch\` 下。
+$userData = @((Join-Path $dest ".csswitch"), (Join-Path $dest "sandbox"))
+foreach ($path in $userData) {
+    if (Test-Path -LiteralPath $path) {
+        throw "输出目录里存在用户数据（$path）。请先备份并移走，再重新打包；脚本不会替你删除它。"
+    }
+}
+if (Get-Process CSSwitch -ErrorAction SilentlyContinue) {
+    throw "CSSwitch 正在运行，无法替换可执行文件。先退出应用（托盘 → 退出）再重试。"
+}
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
 Copy-Item $appExe (Join-Path $dest "CSSwitch.exe")
@@ -73,9 +84,12 @@ foreach ($extra in @("LICENSE", "README.md", "CHANGELOG.md")) {
 }
 foreach ($dir in @("scripts", "docs")) {
     $path = Join-Path $repo $dir
-    if (Test-Path -LiteralPath $path) { Copy-Item $path (Join-Path $dest $dir) -Recurse }
+    if (Test-Path -LiteralPath $path) {
+        $target = Join-Path $dest $dir
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        Copy-Item -Path (Join-Path $path "*") -Destination $target -Recurse -Force
+    }
 }
-
 $info = @"
 CSSwitch $version —— Windows x64 便携版
 构建时间: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss K")
@@ -92,6 +106,10 @@ CSSwitch $version —— Windows x64 便携版
 数据位置:
   %USERPROFILE%\.csswitch\                 CSSwitch 配置 / 日志 / 隔离沙箱
   %USERPROFILE%\.csswitch\sandbox\home\   隔离 HOME（Science 的 data-dir 在其中的 .claude-science）
+
+注意:
+  配置始终在 %USERPROFILE%\.csswitch，不在本文件夹。
+  直接从本文件夹双击运行不会污染发布包。
 "@
 [IO.File]::WriteAllText((Join-Path $dest "BUILD-INFO.txt"), $info, [Text.UTF8Encoding]::new($false))
 

@@ -168,9 +168,20 @@ macOS 专属测试（openat/FIFO/symlink 语义、`lsof`/`ps` 假二进制）在
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File test\win-e2e.ps1
+powershell -ExecutionPolicy Bypass -File test\win-oneclick-e2e.ps1   # 真实跑一次“一键开始”
 ```
 
-覆盖 18 项检查，全部针对真实组件：
+`test\win-oneclick-e2e.ps1` 驱动 `platform_win_tests::one_click_login_starts_isolated_science_on_windows`：
+临时把配置换成指向本机 mock 上游的 profile，跑**真实的** `one_click_login`
+（Gateway → 虚拟登录 → 原生启动 Science → 健康 + 监听 PID + 镜像路径身份校验 → stop 并确认端口关闭），
+然后用备份恢复用户配置。它捕获了四个只在真实组合路径上才会暴露的 bug：
+
+1. Windows 上 `Permissions::mode()` 不含 `0o111`，曾被用来判断可执行位 → 所有真实 Science 都被拒；
+2. `canonicalize()` 在 Windows 返回 `\\?\C:\...`，与保存的 `C:\...` 直接比较永远不等（Skill host context / managed launch 都受影响）；
+3. `File::open(目录).sync_all()` 在 Windows 永远失败（目录不能当文件打开）→ managed launch 记录写不进；
+4. `Permissions::mode()` 返回 `0o644` 时 `mode & 0o077 == 0` 不成立 → 受管启动记录被判“不是私有文件”。
+
+`test\win-e2e.ps1` 覆盖 18 项检查，全部针对真实组件：
 
 1. mock 上游就绪；
 2. Gateway 起来并通过 `/<secret>/health`；

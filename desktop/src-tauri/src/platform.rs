@@ -656,6 +656,53 @@ pub(crate) fn current_pid() -> u32 {
     std::process::id()
 }
 
+/// 规范化绝对路径。
+///
+/// Windows 的 `std::fs::canonicalize` 返回 `\\?\C:\...` 这类 verbatim 前缀，
+/// 而 CSSwitch 从环境变量/配置拿到的路径是不带前缀的 `C:\...`，直接比较永远不等。
+/// 这里在 Windows 上去掉前缀（含 `\\?\UNC\` → `\\`），保持与 POSIX 同形。
+#[cfg(unix)]
+pub(crate) fn canonicalize(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
+}
+
+#[cfg(windows)]
+pub(crate) fn canonicalize(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let text = canonical.to_string_lossy().to_string();
+    // verbatim 前缀：UNC 形式 -> \\server\share\...；本地形式 -> C:\...
+    const VERBATIM_UNC: &str = "\\\\?\\UNC\\";
+    const VERBATIM: &str = "\\\\?\\";
+    if let Some(rest) = text.strip_prefix(VERBATIM_UNC) {
+        return Some(PathBuf::from(format!("{}{}", r"\\", rest)));
+    }
+    if let Some(rest) = text.strip_prefix(VERBATIM) {
+        return Some(PathBuf::from(rest.to_string()));
+    }
+    Some(canonical)
+}
+/// 两个路径是否指向同一个对象（各自规范化后再比）。
+/// Windows 上大小写不敏感。
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+    let (Some(left), Some(right)) = (canonicalize(left), canonicalize(right)) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+/// 路径是否已经是规范形式（用于“必须是 canonical path”这类安全前置条件）。
+pub(crate) fn is_canonical(path: &Path) -> bool {
+    canonicalize(path).is_some_and(|canonical| same_path(&canonical, path))
+}
+
 /// 真实用户的家目录：POSIX 上是 `HOME`，Windows 上是 `USERPROFILE`。/// 隔离沙箱靠重定向这些变量生效，因此“真实目录”必须按平台取。
 #[cfg(unix)]
 pub(crate) fn real_user_home() -> Option<PathBuf> {
@@ -913,11 +960,15 @@ pub(crate) trait PermissionsExt {
 #[cfg(windows)]
 impl PermissionsExt for std::fs::Permissions {
     fn mode(&self) -> u32 {
-        // 只读位映射到 `0o200` 缺失，其余位在 Windows 上没有意义。
+        // Windows 没有 group/world 权限位（也没有 POSIX 的 rwx 模型）。这里用
+        // “只属主”形状表达，即 0o600 / 0o400，使上层的 `mode & 0o077 == 0`、
+        // `mode & 0o022 == 0` 这类“必须是私有文件”的检查在 Windows 上语义正确：
+        // 真正的跨用户隔离由每个用户的 profile ACL 和 platform::verify_private_path
+        // 的 owner SID 校验承担。
         if self.readonly() {
-            0o444
+            0o400
         } else {
-            0o644
+            0o600
         }
     }
 

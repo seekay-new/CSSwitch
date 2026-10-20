@@ -90,13 +90,9 @@ impl ScienceRuntimeIdentity {
         &self,
         sandbox_port: u16,
     ) -> Result<csswitch_skill_install_core::ScienceHostContext, String> {
-        let canonical = self
-            .path
-            .canonicalize()
-            .map_err(|_| "Science binary 不可用，无法启用 Skill attach control")?;
-        if canonical != self.path {
-            return Err("Science binary 不是 canonical path，无法启用 Skill attach control".into());
-        }
+        let canonical = crate::platform::canonicalize(&self.path)
+            .filter(|canonical| crate::platform::same_path(canonical, &self.path))
+            .ok_or("Science binary 不是 canonical path，无法启用 Skill attach control")?;
         let version = self
             .version
             .as_ref()
@@ -442,7 +438,7 @@ fn official_updated_science_bin_for_home(
     let metadata = candidate.symlink_metadata().ok()?;
     if !metadata.file_type().is_file()
         || metadata.uid() != uid
-        || metadata.permissions().mode() & 0o111 == 0
+        || !crate::platform::path_is_executable(&candidate)
         || metadata.permissions().mode() & 0o022 != 0
     {
         return None;
@@ -551,7 +547,7 @@ fn official_updated_snapshot_from_process_paths(
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_file()
         || metadata.uid() != uid
-        || metadata.permissions().mode() & 0o111 == 0
+        || !crate::platform::path_is_executable(path)
         || metadata.permissions().mode() & 0o022 != 0
         || !(MIN_SCIENCE_BINARY_SIZE..=MAX_SCIENCE_BINARY_SIZE).contains(&metadata.len())
         || path.canonicalize().ok().as_deref() != Some(path.as_path())
@@ -724,7 +720,7 @@ fn science_executable_fingerprint(path: &Path) -> Option<ScienceExecutableFinger
         .open(path)
         .ok()?;
     let before = file.metadata().ok()?;
-    if !before.file_type().is_file() || before.permissions().mode() & 0o111 == 0 {
+    if !before.file_type().is_file() || !crate::platform::path_is_executable(path) {
         return None;
     }
     let mut digest = Sha256::new();
@@ -1274,7 +1270,38 @@ fn science_runtime_preflight_for_paths_cached(
         "selected_version": Value::Null,
         "cached_version": Value::Null,
         "download_url": SCIENCE_DOWNLOAD_URL,
+        "checked_path": app_bin.to_string_lossy(),
+        "reason": diagnose_science_candidate(app_bin),
     }))
+}
+
+/// 预检失败时给出**可操作**的原因，而不是一句笼统的“不可用”。
+/// 这里只看文件本身（存在/可执行/大小/格式/`--version`），不泄露路径以外的信息。
+pub(crate) fn diagnose_science_candidate(path: &Path) -> String {
+    if !path.exists() {
+        return format!("找不到文件：{}", path.display());
+    }
+    if !crate::platform::path_is_executable(path) {
+        return "该文件不是本平台的可执行文件，或位于符号链接/重解析点路径下".into();
+    }
+    match path.metadata() {
+        Ok(metadata) => {
+            if !(MIN_SCIENCE_BINARY_SIZE..=MAX_SCIENCE_BINARY_SIZE).contains(&metadata.len()) {
+                return format!(
+                    "文件大小 {} 字节不在 Claude Science 的合理区间（1MB–512MB）",
+                    metadata.len()
+                );
+            }
+        }
+        Err(error) => return format!("读取文件信息失败：{error}"),
+    }
+    if !crate::platform::science_binary_format_ok(path) {
+        return "文件不是本平台的可执行格式（Windows 需要 PE，macOS 需要 Mach-O）".into();
+    }
+    if safe_science_version(path).is_none() {
+        return "`--version` 预检失败：进程无法启动、超时，或输出不合法".into();
+    }
+    "文件本身通过了检查，但 SHA-256 身份指纹绑定失败（探测期间文件发生变化？）".into()
 }
 
 pub(crate) fn science_runtime_preflight(
@@ -1688,10 +1715,8 @@ fn managed_launch_record_for(
     if !runtime.is_current() {
         return None;
     }
-    let runtime_path = runtime.path.canonicalize().ok()?;
-    if runtime_path != runtime.path {
-        return None;
-    }
+    let runtime_path = crate::platform::canonicalize(&runtime.path)
+        .filter(|canonical| crate::platform::same_path(canonical, &runtime.path))?;
     let process_start = process_start_identity(listener_pid)?;
     let (data_dir, data_dir_device, data_dir_inode) = data_dir_identity()?;
     let fingerprint = &runtime.fingerprint;
@@ -1879,8 +1904,9 @@ fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<()
         file.sync_all()
             .map_err(|_| "无法持久化 Science managed launch 临时记录")?;
         fs::rename(&temp, &path).map_err(|_| "无法提交 Science managed launch 记录")?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
+        // 目录 fsync：POSIX 上能证明 rename 已落盘；Windows 不允许把目录当文件打开，
+        // platform::sync_dir 在那里是安全的 no-op（MoveFile 已保证元数据落盘）。
+        crate::platform::sync_dir(parent)
             .map_err(|_| "无法持久化 Science managed launch 记录目录")?;
         Ok(())
     })();
@@ -2072,8 +2098,7 @@ fn restore_unmatched_managed_launch_tombstone(tombstone: &Path, path: &Path) -> 
                     fs::remove_file(tombstone)
                         .map_err(|_| "Science managed launch 记录已恢复但 tombstone 无法清理")?;
                     let parent = path.parent().ok_or("Science managed launch 恢复路径无父目录")?;
-                    File::open(parent)
-                        .and_then(|directory| directory.sync_all())
+                    crate::platform::sync_dir(parent)
                         .map_err(|_| "Science managed launch 恢复目录无法持久化")?;
                     Ok(())
                 }
@@ -2137,8 +2162,7 @@ fn clear_managed_launch_identity(
         });
     }
     fs::remove_file(&tombstone).map_err(|_| "无法清理 Science managed launch 记录")?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    crate::platform::sync_dir(parent)
         .map_err(|_| "无法持久化 Science managed launch 清理")?;
     Ok(())
 }
