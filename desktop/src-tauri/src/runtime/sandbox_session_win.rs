@@ -16,6 +16,7 @@
 //! 回滚、不提供 Skill 路由注册与系统 SSH 桥接。
 
 use serde_json::{json, Value};
+use std::fs;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tauri::Runtime;
@@ -330,6 +331,12 @@ fn one_click_login_with_options<R: Runtime>(
     }
     clear_launch_journal();
     let _ = &launch_token;
+    // Windows 专属：沙箱的 ro-root ACL 盖章与 conda 环境创建有先有后。全新
+    // data-dir 上，`claude-science-mcp` 往往在盖章之后才被创建，于是容器
+    // 无法 spawn 环境里的 python.exe/node.exe → 自检 exit 113 → MCP 环境
+    // 永远 Failed。Science 自带的修复入口就是 `sandbox doctor`（无需管理员），
+    // 它会重新给 conda envs 打上容器 SID 的读/执行权限。这里在后台跑一次。
+    schedule_sandbox_doctor_once(&launch_runtime);
 
     let (message, fallback_url) = if open_surface {
         match open_in_browser(&url) {
@@ -477,8 +484,94 @@ fn wait_for_healthy_launch(
     }
 }
 
-fn write_launch_journal(profile_id: &str) -> Result<(), String> {
-    let dir = config::default_dir();
+/// 一次性（每个 Science 版本）跑 `claude-science sandbox doctor`。
+///
+/// 背景：Windows 原生沙箱是一个 AppContainer。Science 在 `prepare` 阶段才会
+/// 给 `conda/envs`、`conda/pkgs` 等 ro-root 打上容器 SID 的读/执行 ACE。而在
+/// **全新 data-dir** 上，`claude-science-mcp` 环境是在盖章之后才被创建的，于是
+/// 容器无法 spawn 环境内的 `python.exe` / `node.exe`：
+///
+/// ```text
+/// operon-winsbx-stdio-owner: cannot spawn the payload ...\python.exe: 拒绝访问 (0x80070005)
+/// [conda/win32] the sandboxed interpreter self-check ... did not complete (exit 113)
+/// ```
+///
+/// 结果就是 MCP 环境永远停在 Failed，声明包（mcp / pandas / pywin32 / requests）
+/// 永远不会被安装。`sandbox doctor` 是 Science 自带的修复入口（无需管理员），
+/// 它会重新 prepare 并重新盖章。这里在后台跑一次，不阻塞 UI。
+fn schedule_sandbox_doctor_once(runtime: &ScienceRuntimeIdentity) {
+    let marker = config::default_dir().join("sandbox-doctor.v1.json");
+    let version = runtime.version.clone().unwrap_or_default();
+    if marker
+        .is_file()
+        .then(|| fs::read(&marker).ok())
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("science_version")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some(version.as_str())
+    {
+        return;
+    }
+
+    let bin = runtime.path.clone();
+    let data_dir = sandbox_data_dir();
+    let log_path = crate::runtime::system::log_path("sandbox-doctor.log");
+    let home = sandbox_home();
+    std::thread::spawn(move || {
+        if let Some(parent) = log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let output = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path);
+        let mut command = Command::new(&bin);
+        command
+            .arg("sandbox")
+            .arg("doctor")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .stdin(Stdio::null());
+        crate::platform::apply_isolated_home(&mut command, &home);
+        match output {
+            Ok(file) => {
+                let clone = file.try_clone();
+                if let Ok(clone) = clone {
+                    let _ = command
+                        .stdout(Stdio::from(clone))
+                        .stderr(Stdio::from(file))
+                        .status();
+                }
+            }
+            Err(_) => {
+                let _ = command
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        // 不管成功与否都记下版本：doctor 失败时不应每次启动都重跑它。
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "science_version": version,
+            "completed_at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or(0),
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
+            let _ = fs::write(&marker, bytes);
+        }
+    });
+}
+
+fn write_launch_journal(profile_id: &str) -> Result<(), String> {    let dir = config::default_dir();
     let mut cfg = config::load_from(&dir).map_err(|error| error.to_string())?;
     cfg.runtime_transaction = Some(config::RuntimeTransactionJournal {
         transaction_id: format!(
