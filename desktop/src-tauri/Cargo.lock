@@ -824,6 +824,7 @@ dependencies = [
  "base64 0.22.1",
  "csswitch-codex-network",
  "csswitch-skill-install-core",
+ "getrandom 0.2.17",
  "glob",
  "hkdf",
  "libc",
@@ -838,6 +839,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "toml_edit 0.25.12+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -19,6 +19,9 @@ mod lifecycle;
 mod model_catalog;
 mod oauth_forge;
 mod opencode_go_models;
+mod platform;
+#[cfg(all(test, windows))]
+mod platform_win_tests;
 mod proc;
 mod provider_contracts;
 mod runtime;
@@ -413,6 +416,9 @@ pub fn run() {
             commands::runtime::set_settings,
             commands::runtime::set_mode,
             commands::runtime::open_official,
+            commands::science_bin::science_bin_status,
+            commands::science_bin::choose_science_bin,
+            commands::science_bin::clear_science_bin,
             commands::profiles::create_profile,
             commands::profiles::update_profile_metadata,
             commands::profiles::update_profile_connection,
@@ -467,13 +473,15 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| match event {
+        // `Reopen` 是 macOS 的 Dock 点击事件，其它平台没有这个变体。
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => show_main_window(app),
         tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => cleanup_for_exit(app),
         _ => {}
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

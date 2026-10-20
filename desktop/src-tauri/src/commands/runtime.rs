@@ -150,13 +150,29 @@ fn set_mode_inner(
 /// 官方模式：干净地打开用户【真实】的 Claude Science（不碰/复制真实凭证，抹掉 ANTHROPIC_*）。
 #[tauri::command]
 pub(crate) fn open_official() -> Result<(), String> {
-    let app_path = "/Applications/Claude Science.app";
-    let mut cmd = Command::new("open");
-    if Path::new(app_path).is_dir() {
-        cmd.arg(app_path);
-    } else {
-        cmd.arg("-a").arg("Claude Science");
-    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let app_path = "/Applications/Claude Science.app";
+        let mut cmd = Command::new("open");
+        if Path::new(app_path).is_dir() {
+            cmd.arg(app_path);
+        } else {
+            cmd.arg("-a").arg("Claude Science");
+        }
+        cmd
+    };
+    // Windows 上没有 App bundle：直接启动已安装 / 用户指定的 Science 可执行文件。
+    #[cfg(not(target_os = "macos"))]
+    let mut cmd = {
+        let bin = crate::runtime::science::installed_science_bin();
+        if !bin.is_file() {
+            return Err(format!(
+                "未找到 Claude Science 程序（期望位置：{}）。请先安装 Claude Science，或在设置中选择程序路径。",
+                bin.display()
+            ));
+        }
+        Command::new(bin)
+    };
     cmd.env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -982,7 +998,7 @@ pub(crate) async fn quit_app(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         config_last_error_json, manual_open_result, science_failure_stage,
@@ -6334,7 +6350,7 @@ exec '{}' "$@"
         let valid_receipt_metadata = managed_launch_path.symlink_metadata().unwrap();
         assert_eq!(
             valid_receipt_metadata.uid(),
-            unsafe { libc::geteuid() },
+            crate::platform::current_user_id(),
             "managed launch receipt must be owned by the current user"
         );
         let listener_pid_before_rejection = fs::read_to_string(fake_state_dir.join("pid")).unwrap();

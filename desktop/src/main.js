@@ -2535,9 +2535,14 @@ async function oneClick() {
       return;
     }
     showRuntimeChoice(preflight || { status: "missing" });
+    const binStatus = await refreshScienceBin();
+    const missingHint =
+      binStatus && !binStatus.found && binStatus.platform !== "macos"
+        ? "（未找到 Claude Science 程序：请到「设置」页的 Claude Science 程序卡片中指定 exe 路径。）"
+        : "";
     setMsg(preflight && preflight.status === "cached_choice_required"
       ? "Claude Science App 不可用或未通过预检。请选择是否仅本次使用已确认版本的缓存。"
-      : "Claude Science App 不可用或未通过预检，且没有可安全启动的缓存版本。", "err");
+      : "Claude Science App 不可用或未通过预检，且没有可安全启动的缓存版本。" + missingHint, "err");
   } catch (e) {
     setMsg("Science 运行环境检查失败：" + e, "err");
   } finally {
@@ -2674,12 +2679,79 @@ async function refreshStatus() {
   }
 }
 
+// ── Claude Science 程序路径 ──
+// macOS 上 Science 固定在 App bundle 里，不需要配置；Windows 上它可能来自官方安装器，
+// 也可能只是用户自己下载的单文件 exe，所以这里提供一个显式选择入口。
+async function refreshScienceBin() {
+  try {
+    const status = await call("science_bin_status");
+    renderScienceBin(status);
+    return status;
+  } catch (e) {
+    if (els.scienceBinSec) els.scienceBinSec.hidden = true;
+    return null;
+  }
+}
+
+function renderScienceBin(status) {
+  if (!els.scienceBinSec) return;
+  const platform = (status && status.platform) || "";
+  els.scienceBinSec.hidden = platform === "macos";
+  if (platform === "macos") return;
+  const found = !!(status && status.found);
+  const sourceLabel = !status
+    ? "未知"
+    : status.source === "user"
+      ? "已指定"
+      : status.source === "env"
+        ? "来自 SCIENCE_BIN"
+        : status.source === "auto"
+          ? "已自动发现"
+          : "未找到";
+  els.scienceBinBadge.textContent = sourceLabel;
+  els.scienceBinBadge.className = found ? "badge" : "badge warn";
+  if (found) {
+    els.scienceBinDetail.innerHTML =
+      "当前使用：<code>" + escapeHtml(status.path) + "</code> · 版本 " + escapeHtml(status.version || "未知");
+  } else {
+    els.scienceBinDetail.textContent =
+      "未找到 Claude Science 程序。请点击「选择程序…」指定 claude-science.exe（或先安装官方 Claude Science）。";
+  }
+  els.scienceBinClearBtn.disabled = !(status && status.source === "user");
+}
+
+async function chooseScienceBin() {
+  setMsg("请选择 Claude Science 程序…");
+  try {
+    const result = await call("choose_science_bin");
+    if (result && result.status === "cancelled") {
+      setMsg("已取消选择。");
+      return;
+    }
+    setMsg("已保存 Claude Science 程序（版本 " + ((result && result.version) || "未知") + "）。", "ok");
+    await refreshScienceBin();
+  } catch (e) {
+    setMsg("选择 Claude Science 程序失败：" + e, "err");
+  }
+}
+
+async function clearScienceBin() {
+  try {
+    await call("clear_science_bin");
+    setMsg("已恢复自动发现 Claude Science 程序。", "ok");
+    await refreshScienceBin();
+  } catch (e) {
+    setMsg("恢复自动发现失败：" + e, "err");
+  }
+}
+
 function wire() {
   [
     "oneClickBtn", "stopBtn", "importSkillBtn", "refreshSkillsBtn", "ltProxy", "ltSandbox", "ltUpstream",
     "runtimeChoiceSec", "runtimeChoiceText", "runtimeUseCacheBtn", "runtimeDownloadBtn", "runtimeChoiceCancelBtn",
     "historyRecoverySec", "historyRecoveryText", "historyRecoveryChoices", "historyRecoveryCancelBtn",
     "msg", "browserFallback", "browserFallbackUrl", "browserFallbackCopyBtn", "browserFallbackRetryBtn", "brandDot", "openBrowserBtn", "doctorBtn", "updateBtn", "verLabel",
+    "scienceBinSec", "scienceBinBadge", "scienceBinDetail", "scienceBinChooseBtn", "scienceBinClearBtn",
     "reportBtn", "logsBtn", "quitBtn", "modeSeg", "proxyPort", "sandboxPort", "reuseSystemSsh", "advSec",
     "codexEnabled", "codexAuthStatus", "codexStatusBtn", "codexLoginBtn", "codexCancelBtn", "codexLogoutBtn", "codexProfileRepairBox", "codexRepairProfileBtn",
     "codexNetworkMode", "codexProxyUrl", "codexNetworkResolved", "codexNetworkSaveBtn", "codexDowngradeBox", "codexDowngradeBtn",
@@ -2720,6 +2792,8 @@ function wire() {
   els.codexNetworkMode.addEventListener("change", codexNetworkModeChanged);
   els.codexNetworkSaveBtn.addEventListener("click", saveCodexNetwork);
   els.codexDowngradeBtn.addEventListener("click", requestCodexDowngrade);
+  els.scienceBinChooseBtn.addEventListener("click", chooseScienceBin);
+  els.scienceBinClearBtn.addEventListener("click", clearScienceBin);
 
   // 列表行内操作（事件委托；忙碌时忽略）。
   els.profileList.addEventListener("click", (e) => {
@@ -2829,6 +2903,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   }
   setPage(SKILLS_PREVIEW ? "skills" : "switch");
   await loadConfig();
+  await refreshScienceBin();
   if (!PREVIEW && window.__TAURI__.event) {
     try {
       await Promise.all([

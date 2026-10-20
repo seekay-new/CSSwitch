@@ -35,3 +35,12 @@
 ## 测试
 
 - 真机验收矩阵描述应执行的场景，不表示最终 v0.8.2 DMG 已逐项全部执行。每次验收必须绑定 exact artifact，并把通过、失败、环境阻塞与未执行分开记录。
+
+## Windows x64（移植）
+
+- 当前证据边界：`cargo test --lib`（129 passed / 5 ignored，含 Windows 平台原语、配置往返、虚拟登录 forge 往返）与 `test/win-e2e.ps1`（18/18：gateway→上游→模型透传、Science 启动/健康/status、端口→PID→镜像身份、隔离、停止）。**桌面 UI 的点击组合路径尚未自动化**，需按 `docs/operations/windows.md` 第 5 节手工验收一次。
+- 未移植（明确报错，不静默降级）：Skill/MCP 管理（依赖 POSIX `openat` 原子 store）、系统 SSH 配置复用、多份历史 org 选择。
+- authority snapshot 回滚在 Windows 上简化为一条启动 journal：`serve` 之后失败会报 `environment_uncertain` 并要求人工确认，不做“看起来干净”的回滚。
+- Windows 上没有 POSIX 的 group/world 权限位，`MetadataExt::dev/ino` 也取不到（std 的 `windows_by_handle` 未稳定）。因此“私有路径”判定改为 ACL owner SID + reparse point 检查；真实的文件身份绑定走 `platform::file_identity`。这一边界比 macOS 的 openat 方案弱（检查与打开之间存在极小窗口），已在代码与文档中写明。
+- 不使用 MSVC：目标为 `x86_64-pc-windows-gnu`。因此 `WebView2Loader.dll` 必须随包分发；Tauri/winit 需要的 Common Controls v6 清单由 `build.rs` 用 `windres` 链入（否则进程与测试二进制都会以 `0xC0000139` 退出）。
+- 安装器（NSIS/MSI）需联网下载 NSIS，未纳入自动验证；便携包已可用。

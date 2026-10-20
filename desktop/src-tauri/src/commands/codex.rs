@@ -898,7 +898,7 @@ fn set_nonblocking_stdout(stdout: &std::process::ChildStdout) -> Result<(), Stri
 
     let fd = stdout.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | crate::platform::O_NONBLOCK) } < 0 {
         return Err("无法为 Codex 认证 sidecar 建立有界输出通道。".into());
     }
     Ok(())
@@ -2091,12 +2091,12 @@ pub(crate) async fn codex_downgrade_export_all(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;
     use std::net::TcpListener;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 

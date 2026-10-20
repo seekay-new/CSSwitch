@@ -66,7 +66,7 @@ const fn libc_o_nofollow() -> i32 {
 
 /// Open/truncate a child-process log, ensuring parent dir is 0700 and file is 0600.
 pub(crate) fn open_log(name: &str) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use crate::platform::{OpenOptionsExt, PermissionsExt};
     let p = log_path(name);
     if let Some(parent) = p.parent() {
         config::assert_not_symlink(parent)?;
@@ -88,7 +88,7 @@ pub(crate) fn open_log(name: &str) -> std::io::Result<std::fs::File> {
 /// Append a redaction-safe operation event to `operation.log`.
 /// Callers must pass only coarse stage metadata, never keys, secrets, base URLs, or request bodies.
 pub(crate) fn append_operation_log(line: &str) {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use crate::platform::{OpenOptionsExt, PermissionsExt};
     let p = log_path("operation.log");
     let Some(parent) = p.parent() else {
         return;
@@ -124,7 +124,7 @@ fn should_rotate_operation_log(current_bytes: u64, incoming_bytes: u64) -> bool 
 }
 
 fn rotate_operation_log_if_needed(p: &Path, incoming_bytes: u64) {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
 
     let Ok(md) = std::fs::metadata(p) else {
         return;
@@ -171,7 +171,15 @@ pub(crate) fn kill_child(slot: &mut Option<Child>) {
 /// Open a URL with the system browser (macOS `open`) and verify exit status.
 fn select_browser_open_binary(override_bin: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
     let Some(raw) = override_bin else {
-        return Ok(PathBuf::from("/usr/bin/open"));
+        #[cfg(windows)]
+        {
+            // Windows 走 `cmd /C start`，不需要外部 opener。
+            return Ok(PathBuf::from("cmd"));
+        }
+        #[cfg(not(windows))]
+        {
+            return Ok(PathBuf::from("/usr/bin/open"));
+        }
     };
     let path = PathBuf::from(raw);
     if !path.is_absolute() {
@@ -184,7 +192,7 @@ fn select_browser_open_binary(override_bin: Option<std::ffi::OsString>) -> Resul
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::platform::PermissionsExt;
         if meta.permissions().mode() & 0o111 == 0 {
             return Err("Acceptance 测试 opener 不可执行".into());
         }
@@ -207,12 +215,21 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     // system opener. Only an explicit test-only absolute executable override
     // can divert an Acceptance/test run into a fake evidence recorder.
     let open_bin = browser_open_binary()?;
-    let st = Command::new(&open_bin)
+    #[cfg(windows)]
+    let mut command = {
+        // Windows 没有 `open`：用 ShellExecuteW 走系统默认浏览器。
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("start").arg("");
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = Command::new(&open_bin);
+    let st = command
         .arg(url)
         .status()
         .map_err(|e| format!("打开浏览器失败：{e}"))?;
     if !st.success() {
-        return Err(format!("open 非零退出（{:?}）", st.code()));
+        return Err(format!("打开浏览器非零退出（{:?}）", st.code()));
     }
     Ok(())
 }
@@ -226,10 +243,11 @@ mod tests {
 
     #[test]
     fn browser_open_defaults_to_system_binary_and_rejects_relative_override() {
-        assert_eq!(
-            select_browser_open_binary(None).unwrap(),
-            Path::new("/usr/bin/open")
-        );
+        let default = select_browser_open_binary(None).unwrap();
+        #[cfg(windows)]
+        assert_eq!(default, Path::new("cmd"));
+        #[cfg(not(windows))]
+        assert_eq!(default, Path::new("/usr/bin/open"));
         assert!(select_browser_open_binary(Some("open".into())).is_err());
     }
 

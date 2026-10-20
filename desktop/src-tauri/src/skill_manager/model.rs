@@ -82,8 +82,7 @@ impl<'de> Deserialize<'de> for SkillId {
 
 impl SkillId {
     pub(crate) fn new_random() -> io::Result<Self> {
-        let mut bytes = [0_u8; 16];
-        File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        let bytes = crate::platform::random_bytes(16)?;
         let mut value = String::with_capacity(SKILL_ID_PREFIX.len() + bytes.len() * 2);
         value.push_str(SKILL_ID_PREFIX);
         for byte in bytes {

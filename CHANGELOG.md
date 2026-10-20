@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.8.4-windows] — 2026-10-20
+
+Windows x64 移植（源码在同一条版本线上，产物为独立的 Windows 便携包）。
+
+### Added
+
+- Windows x64 目标 `x86_64-pc-windows-gnu` 可构建、可运行、可打包（`scripts/package-windows.ps1`），全程无需管理员权限与 MSVC。
+- 新增平台原语层 `src/platform.rs`：用户身份（token SID）、文件身份（volume serial + file index）、ACL owner + reparse point 检查、端口→PID（netstat）、进程启动身份（`GetProcessTimes`）、镜像路径（`QueryFullProcessImageNameW`）、`TerminateProcess`、PE 格式门、`getrandom`、`cmd /C start` 打开浏览器。
+- 新增 Windows 一键启动会话 `src/runtime/sandbox_session_win.rs`：原生 Rust 启动 Science（不再依赖 `zsh` 脚本），保留「身份被证明才发信号 / 端口真关闭才算停止 / 启动后失败报 `environment_uncertain`」三条合同。
+- 新增「设置 → Claude Science 程序」：文件选择器 + 格式/大小/`--version` 校验后持久化；`%LOCALAPPDATA%\Programs\ClaudeScience` 等位置仍可自动发现。
+- 新增 `test/win-e2e.ps1`（18 项断言，mock 上游即可跑通全链路）与 `src/platform_win_tests.rs`（Windows 平台原语 + 配置往返 + 虚拟登录 forge 往返）。
+- `build.rs`：在 windows-gnu 上自动嵌入 Common Controls v6 清单（用 `windres`），并自动分发 `WebView2Loader.dll`。
+
+### Changed
+
+- `oauth_forge` / `config` / `proc` / `skill_manager` 的随机数来源由硬编码 `/dev/urandom` 改为 `platform::random_bytes`（Windows 走 `getrandom`/`BCryptGenRandom`）。
+- `config::SecureDir` 增加 Windows 实现：POSIX 的 dirfd + `openat` 边界换成「目录审计 + 每次不跟随重解析点打开 + 单 hard link 校验」，并在代码与文档中写明残余风险。
+- `MetadataExt::dev/ino` 在 Windows 上返回 0（std 的 `windows_by_handle` 仍未稳定），需要真实文件身份的安全边界改用 `platform::file_identity`。
+- macOS 专属测试（`openat`/FIFO/`lsof`/`ps`/Mach-O 假二进制）改为 `#[cfg(all(test, unix))]`，Windows 侧以新增测试覆盖同等语义。
+
+### Known limitations
+
+- Skill/MCP 管理、系统 SSH 配置复用、多份历史 org 选择在 Windows 上**明确报不支持**，不做半实现。
+- authority snapshot 回滚在 Windows 上简化为一条启动 journal（失败后要求人工确认）。
+- 安装器（NSIS/MSI）需额外联网下载 NSIS；便携包已可用。
+- 详见 `docs/operations/windows.md`。
+
 ## [0.8.4] — 2026-07-29
 
 ### Fixed

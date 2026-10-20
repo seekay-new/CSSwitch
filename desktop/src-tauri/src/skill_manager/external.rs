@@ -212,7 +212,7 @@ fn scan_external_home_skills_with_hooks(
                 "外部 Skill 数量超过 256 个扫描上限",
             ));
         }
-        if skill_md_kind != libc::S_IFREG {
+        if skill_md_kind != crate::platform::S_IFREG {
             report.diagnostics.push(diagnostic(
                 name,
                 SkillErrorCode::UnsupportedFileType,

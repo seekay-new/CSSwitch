@@ -262,7 +262,7 @@ where
     ManagedGatewayCleanup::StopFailed(pid)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         is_legacy_csswitch_python, parse_lsof_records, parse_ps_record,

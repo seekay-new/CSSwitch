@@ -591,6 +591,16 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+/// Byte length of an installed-relative path, used for the fail-closed size gate.
+/// Non-UTF-8 components saturate the length so the caller rejects them here as
+/// well; the explicit non-UTF-8 check that follows still reports its own error.
+fn relative_text_len_bytes(path: &Path) -> usize {
+    match path.to_str() {
+        Some(text) if !text.is_empty() => text.len(),
+        _ => usize::MAX,
+    }
+}
+
 fn register_installed_path(
     collision_keys: &mut BTreeMap<String, (PathBuf, bool)>,
     relative: &Path,
@@ -694,7 +704,7 @@ pub(crate) fn scan_installed_payload_with_limits(
                     "recovery",
                 ));
             }
-            if relative.as_os_str().as_bytes().len() > MAX_PATH_BYTES
+            if relative_text_len_bytes(&relative) > MAX_PATH_BYTES
                 || relative.components().count() > MAX_PATH_DEPTH
             {
                 return Err(error(

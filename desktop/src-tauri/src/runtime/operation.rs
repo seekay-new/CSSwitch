@@ -165,7 +165,7 @@ fn stage_delta_ms(previous_elapsed_ms: u128, elapsed_ms: u128) -> u128 {
     elapsed_ms.saturating_sub(previous_elapsed_ms)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         sanitize_detail, stage_delta_ms, CODEX_AUTH_MUTATION_LOCK_BUDGET_MS,

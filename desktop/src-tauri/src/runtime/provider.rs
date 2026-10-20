@@ -673,7 +673,7 @@ pub(crate) fn parse_endpoint(url: &str) -> Option<UpstreamEndpoint> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         adapter_for_profile, assert_format_supported, catalog_fingerprint,

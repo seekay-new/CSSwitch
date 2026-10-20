@@ -128,7 +128,7 @@ impl AnchoredSourceRoot {
     pub(crate) fn open(path: &Path) -> SkillResult<Self> {
         let directory = open_source_dir(path, &|_| {})?;
         let snapshot = fd_stat(directory.0)?;
-        if file_kind(snapshot.st_mode) != libc::S_IFDIR {
+        if file_kind(snapshot.st_mode) != crate::platform::S_IFDIR {
             return Err(unsupported_type());
         }
         Ok(Self {
@@ -205,11 +205,11 @@ impl AnchoredSourceEntry {
     }
 
     pub(crate) fn is_directory(&self) -> bool {
-        file_kind(self.snapshot.st_mode) == libc::S_IFDIR
+        file_kind(self.snapshot.st_mode) == crate::platform::S_IFDIR
     }
 
     pub(crate) fn is_symlink(&self) -> bool {
-        file_kind(self.snapshot.st_mode) == libc::S_IFLNK
+        file_kind(self.snapshot.st_mode) == crate::platform::S_IFLNK
     }
 }
 
@@ -253,7 +253,7 @@ fn inspect_opened_skill_source(
     before_open: &dyn Fn(&Path),
 ) -> SkillResult<InspectionResult> {
     let root_before = fd_stat(root_fd.0)?;
-    if file_kind(root_before.st_mode) != libc::S_IFDIR {
+    if file_kind(root_before.st_mode) != crate::platform::S_IFDIR {
         return Err(unsupported_type());
     }
 
@@ -346,7 +346,7 @@ impl Scanner<'_> {
             let name_c = os_to_cstring(&name)?;
             let before = fstatat(dir_fd, &name_c)?;
             match file_kind(before.st_mode) {
-                libc::S_IFDIR => {
+                crate::platform::S_IFDIR => {
                     if self.directory_count >= self.limits.directory_count {
                         return Err(limit_error("Skill 目录数量超过 1,000"));
                     }
@@ -362,8 +362,8 @@ impl Scanner<'_> {
                         return Err(source_changed());
                     }
                 }
-                libc::S_IFREG => self.read_file(dir_fd, &name_c, &child_relative, &before)?,
-                libc::S_IFLNK => return Err(unsafe_path("Skill 中不允许符号链接")),
+                crate::platform::S_IFREG => self.read_file(dir_fd, &name_c, &child_relative, &before)?,
+                crate::platform::S_IFLNK => return Err(unsafe_path("Skill 中不允许符号链接")),
                 _ => return Err(unsupported_type()),
             }
         }
@@ -409,7 +409,7 @@ impl Scanner<'_> {
         let fd = openat_file(dir_fd, name)?;
         let opened = fd_stat(fd.0)?;
         if !same_snapshot(before, &opened)
-            || file_kind(opened.st_mode) != libc::S_IFREG
+            || file_kind(opened.st_mode) != crate::platform::S_IFREG
             || opened.st_nlink != 1
         {
             return Err(source_changed());
@@ -609,7 +609,7 @@ fn open_source_dir(source: &Path, before_component_open: &dyn Fn(&Path)) -> Skil
     let root_fd = unsafe {
         libc::open(
             root_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            crate::platform::O_RDONLY | crate::platform::O_DIRECTORY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
         )
     };
     if root_fd < 0 {
@@ -624,10 +624,10 @@ fn open_source_dir(source: &Path, before_component_open: &dyn Fn(&Path)) -> Skil
                 current.push(value);
                 let name = os_to_cstring(value)?;
                 let before = fstatat(current_fd.0, &name)?;
-                if file_kind(before.st_mode) == libc::S_IFLNK {
+                if file_kind(before.st_mode) == crate::platform::S_IFLNK {
                     return Err(unsafe_path("Skill 来源路径不能经过符号链接"));
                 }
-                if file_kind(before.st_mode) != libc::S_IFDIR {
+                if file_kind(before.st_mode) != crate::platform::S_IFDIR {
                     return Err(SkillManagerError::new(
                         SkillErrorCode::InvalidSource,
                         "Skill 来源必须是可读的普通目录",
@@ -761,7 +761,7 @@ fn openat_dir(parent: RawFd, name: &CStr) -> SkillResult<OwnedFd> {
         libc::openat(
             parent,
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            crate::platform::O_RDONLY | crate::platform::O_DIRECTORY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
         )
     };
     if fd < 0 {
@@ -776,7 +776,7 @@ fn openat_file(parent: RawFd, name: &CStr) -> SkillResult<OwnedFd> {
         libc::openat(
             parent,
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            crate::platform::O_RDONLY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW | crate::platform::O_NONBLOCK,
         )
     };
     if fd < 0 {
@@ -841,7 +841,7 @@ fn same_snapshot(left: &libc::stat, right: &libc::stat) -> bool {
 }
 
 fn file_kind(mode: libc::mode_t) -> libc::mode_t {
-    mode & libc::S_IFMT
+    mode & crate::platform::S_IFMT
 }
 
 fn unsafe_path(message: &str) -> SkillManagerError {

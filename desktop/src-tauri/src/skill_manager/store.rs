@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
+use crate::platform::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, TryLockError};
@@ -200,7 +200,7 @@ impl SkillManager {
             let metadata = fs::symlink_metadata(&self.paths.root).map_err(|_| store_conflict())?;
             if !metadata.is_dir()
                 || metadata.file_type().is_symlink()
-                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.uid() != crate::platform::current_user_id()
             {
                 return Err(store_conflict());
             }
@@ -1888,13 +1888,13 @@ impl CapturedTree {
             let stat = directory
                 .child_stat(&os_cstring(&name)?)?
                 .ok_or_else(store_conflict)?;
-            match stat.st_mode & libc::S_IFMT {
-                libc::S_IFREG => entries.push(CapturedEntry::File {
+            match stat.st_mode & crate::platform::S_IFMT {
+                crate::platform::S_IFREG => entries.push(CapturedEntry::File {
                     file: directory.open_regular_file(&name)?,
                     snapshot: stat,
                     name,
                 }),
-                libc::S_IFDIR => {
+                crate::platform::S_IFDIR => {
                     let child = directory.open_child(&name)?;
                     child.validate_owned()?;
                     entries.push(CapturedEntry::Directory {
@@ -2014,7 +2014,7 @@ impl SafeDir {
         let fd = unsafe {
             libc::open(
                 root.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_DIRECTORY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2053,7 +2053,7 @@ impl SafeDir {
         let fd = unsafe {
             libc::open(
                 root.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_DIRECTORY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2088,7 +2088,7 @@ impl SafeDir {
 
     pub(super) fn validate_owned(&self) -> SkillResult<()> {
         let stat = file_stat(&self.file)?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+        if stat.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR
             || stat.st_uid != current_euid()
             || stat.st_mode & 0o777 != 0o700
         {
@@ -2100,7 +2100,7 @@ impl SafeDir {
     pub(super) fn validate_external_owned(&self) -> SkillResult<()> {
         let stat = file_stat(&self.file)?;
         let mode = stat.st_mode & 0o777;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+        if stat.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR
             || stat.st_uid != current_euid()
             || mode & 0o022 != 0
         {
@@ -2112,7 +2112,7 @@ impl SafeDir {
     pub(super) fn open_child(&self, name: &std::ffi::OsStr) -> SkillResult<Self> {
         let name = os_cstring(name)?;
         let before = self.child_stat(&name)?.ok_or_else(store_conflict)?;
-        if before.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        if before.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR {
             return Err(store_conflict());
         }
         // SAFETY: parent fd and name are valid; O_NOFOLLOW rejects a symlink leaf.
@@ -2120,7 +2120,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_DIRECTORY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2190,7 +2190,7 @@ impl SafeDir {
             .child_stat(&os_cstring(name)?)?
             .ok_or_else(store_conflict)?;
         let opened = file_stat(&child.file)?;
-        if current.st_mode & libc::S_IFMT != libc::S_IFDIR
+        if current.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR
             || current.st_dev != opened.st_dev
             || current.st_ino != opened.st_ino
         {
@@ -2228,7 +2228,7 @@ impl SafeDir {
         let name = os_cstring(name)?;
         let expected = self.child_stat(&name)?.ok_or_else(store_conflict)?;
         let mode = expected.st_mode & 0o777;
-        if expected.st_mode & libc::S_IFMT != libc::S_IFREG
+        if expected.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || expected.st_nlink != 1
             || expected.st_size < 0
             || expected.st_size as u64 > max_size
@@ -2243,7 +2243,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2275,7 +2275,7 @@ impl SafeDir {
         let current = self
             .child_stat(&os_cstring(name)?)?
             .ok_or_else(store_conflict)?;
-        if current.st_mode & libc::S_IFMT != libc::S_IFREG
+        if current.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || current.st_dev as u64 != identity.device
             || current.st_ino as u64 != identity.inode
         {
@@ -2300,7 +2300,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_WRONLY | crate::platform::O_CREAT | crate::platform::O_EXCL | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
                 0o600,
             )
         };
@@ -2328,7 +2328,7 @@ impl SafeDir {
         let name_c = os_cstring(name)?;
         let expected = self.child_stat(&name_c)?.ok_or_else(store_conflict)?;
         let mode = expected.st_mode & 0o777;
-        if expected.st_mode & libc::S_IFMT != libc::S_IFREG
+        if expected.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || expected.st_nlink != 1
             || expected.st_size < 0
             || expected.st_size as u64 > max_size
@@ -2341,7 +2341,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name_c.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2367,7 +2367,7 @@ impl SafeDir {
     pub(super) fn read_file(&self, name: &std::ffi::OsStr, max_size: u64) -> SkillResult<Vec<u8>> {
         let name = os_cstring(name)?;
         let expected = self.child_stat(&name)?.ok_or_else(store_conflict)?;
-        if expected.st_mode & libc::S_IFMT != libc::S_IFREG
+        if expected.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || expected.st_nlink != 1
             || expected.st_size < 0
             || expected.st_size as u64 > max_size
@@ -2381,7 +2381,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2412,7 +2412,7 @@ impl SafeDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                crate::platform::O_RDONLY | crate::platform::O_CLOEXEC | crate::platform::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -2421,7 +2421,7 @@ impl SafeDir {
         // SAFETY: fd was returned by openat and ownership transfers to File.
         let file = unsafe { File::from_raw_fd(fd) };
         let stat = file_stat(&file)?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_nlink != 1 {
+        if stat.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG || stat.st_nlink != 1 {
             return Err(store_conflict());
         }
         Ok(file)
@@ -2431,7 +2431,7 @@ impl SafeDir {
         let name_c = os_cstring(name)?;
         let opened = file_stat(verified)?;
         let current = self.child_stat(&name_c)?.ok_or_else(store_conflict)?;
-        if current.st_mode & libc::S_IFMT != libc::S_IFREG
+        if current.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || current.st_dev != opened.st_dev
             || current.st_ino != opened.st_ino
         {
@@ -2481,7 +2481,7 @@ impl SafeDir {
         let Some(stat) = self.child_stat(&name_c)? else {
             return Ok(());
         };
-        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        if stat.st_mode & crate::platform::S_IFMT == crate::platform::S_IFDIR {
             let child = self.open_child(name)?;
             return self.remove_verified_child(name, &child);
         } else {
@@ -2502,7 +2502,7 @@ impl SafeDir {
         let name_c = os_cstring(name)?;
         let opened = file_stat(&verified.file)?;
         let current = self.child_stat(&name_c)?.ok_or_else(store_conflict)?;
-        if current.st_mode & libc::S_IFMT != libc::S_IFDIR
+        if current.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR
             || current.st_dev != opened.st_dev
             || current.st_ino != opened.st_ino
         {
@@ -2534,7 +2534,7 @@ impl SafeDir {
         let name_c = os_cstring(name)?;
         let opened = file_stat(&verified.file)?;
         let current = self.child_stat(&name_c)?.ok_or_else(store_conflict)?;
-        if current.st_mode & libc::S_IFMT != libc::S_IFDIR
+        if current.st_mode & crate::platform::S_IFMT != crate::platform::S_IFDIR
             || current.st_dev != opened.st_dev
             || current.st_ino != opened.st_ino
         {
@@ -2775,7 +2775,7 @@ fn assert_inventory_target_safe(root: &SafeDir) -> SkillResult<()> {
 fn assert_regular_owned_target_safe(root: &SafeDir, target: &str) -> SkillResult<()> {
     let name = os_cstring(target.as_ref())?;
     if let Some(stat) = root.child_stat(&name)? {
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+        if stat.st_mode & crate::platform::S_IFMT != crate::platform::S_IFREG
             || stat.st_nlink != 1
             || stat.st_uid != current_euid()
             || stat.st_mode & 0o777 != 0o600
@@ -2957,8 +2957,8 @@ fn walk_stored_payload(
         }
         let name_c = os_cstring(&name)?;
         let stat = directory.child_stat(&name_c)?.ok_or_else(store_conflict)?;
-        match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => {
+        match stat.st_mode & crate::platform::S_IFMT {
+            crate::platform::S_IFDIR => {
                 if scan.directory_count >= MAX_DIRECTORY_COUNT {
                     return Err(store_conflict());
                 }
@@ -2967,7 +2967,7 @@ fn walk_stored_payload(
                 child.validate_owned()?;
                 walk_stored_payload(&child, &child_relative, depth + 1, scan)?;
             }
-            libc::S_IFREG => {
+            crate::platform::S_IFREG => {
                 if scan.files.len() >= MAX_FILE_COUNT || stat.st_nlink != 1 || stat.st_size < 0 {
                     return Err(store_conflict());
                 }
@@ -3022,7 +3022,7 @@ fn now_ms() -> u64 {
 
 fn current_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and does not mutate process state.
-    unsafe { libc::geteuid() }
+    crate::platform::current_user_id()
 }
 
 fn is_declared_downgrade(old: Option<&str>, new: Option<&str>) -> bool {

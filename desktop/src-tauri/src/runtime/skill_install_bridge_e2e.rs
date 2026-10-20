@@ -35,7 +35,7 @@ fn free_port() -> u16 {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
 
     fs::write(path, body).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1985,7 +1985,7 @@ fn wait_data_logs_contain(data_dir: &Path, needle: &str) {
 #[test]
 #[ignore = "explicit installed Science local-MCP dialogue E2E; temp HOME/data-dir, public GitHub, local mock/browser only"]
 fn isolated_science_installs_attaches_and_persists_external_skill() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use crate::platform::{MetadataExt, PermissionsExt};
 
     assert_eq!(
         std::env::var("CSSWITCH_REAL_SCIENCE_SKILL_INSTALL_MCP_E2E").as_deref(),
@@ -2520,7 +2520,7 @@ fn isolated_science_accepts_many_csswitch_aliases_and_refreshes_after_restart() 
 #[test]
 #[ignore = "explicit installed Science SSH preflight E2E; temp outer HOME/data-dir and fixture aliases only"]
 fn isolated_science_registers_csswitch_managed_ssh_hosts_and_revoke_restores_toml() {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
 
     assert_eq!(
         std::env::var("CSSWITCH_REAL_SCIENCE_SSH_E2E").as_deref(),

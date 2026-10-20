@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+use crate::platform::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,11 +21,26 @@ use crate::{config, proc};
 
 use super::system::{asset_root, kill_child};
 
+/// macOS 官方安装位置（App bundle 内）。
+#[cfg(target_os = "macos")]
 pub(crate) const SCIENCE_BIN: &str =
     "/Applications/Claude Science.app/Contents/Resources/bin/claude-science";
+
+/// Windows 官方安装位置：`claude-science install` 把程序复制到
+/// `%LOCALAPPDATA%\Programs\ClaudeScience\claude-science.exe`。
 pub(crate) const SCIENCE_DOWNLOAD_URL: &str = "https://claude.com/download";
 pub(crate) const CACHED_ONCE_CHOICE: &str = "cached_once";
+
+/// Science 可执行文件名（平台差异只在扩展名）。
+#[cfg(windows)]
+const SCIENCE_BIN_FILENAME: &str = "claude-science.exe";
+#[cfg(not(windows))]
+const SCIENCE_BIN_FILENAME: &str = "claude-science";
+
+#[cfg(unix)]
 const OFFICIAL_UPDATED_RUNTIME_RELATIVE: &str = ".claude-science/bin/claude-science";
+#[cfg(windows)]
+const OFFICIAL_UPDATED_RUNTIME_RELATIVE: &str = ".claude-science/bin/claude-science.exe";
 const OFFICIAL_UPDATED_SCIENCE_IDENTIFIERS: [&str; 2] =
     ["com.anthropic.operon", "com.anthropic.operon.cli"];
 const OFFICIAL_SCIENCE_TEAM_ID: &str = "Q6L2SF6YDW";
@@ -301,15 +318,15 @@ fn is_executable_file(path: &Path) -> bool {
         current.push(component.as_os_str());
         match current.symlink_metadata() {
             Ok(metadata) if metadata.file_type().is_symlink() => return false,
+            // Windows 的 junction / mount point 不是 `is_symlink()` 能全部覆盖的
+            // 情形，但 std 的 `is_symlink()` 已经同时覆盖 symlink 与 mount point；
+            // 这里再叠加平台检查，保证链接永远不会被穿透读取。
+            Ok(_) if crate::platform::path_is_reparse_or_link(&current) => return false,
             Ok(_) => {}
             Err(_) => return false,
         }
     }
-    path.is_file()
-        && path
-            .metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+    path.is_file() && crate::platform::path_is_executable(path)
 }
 
 fn is_explicit_executable_file(path: &Path) -> bool {
@@ -341,25 +358,36 @@ fn official_updated_identity_metadata_matches(path: &Path) -> bool {
     // exact allowlisted fields only as format/identity guards; the local trust
     // boundary remains the fixed user-owned path plus SHA-256-bound runtime
     // identity below, not a claim of verified official provenance.
-    let output = Command::new("/usr/bin/codesign")
-        .args(["-d", "--verbose=4"])
-        .arg(path)
-        .stdout(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return false;
-    };
-    if !output.status.success() || output.stderr.len() > 64 * 1024 {
-        return false;
+    #[cfg(unix)]
+    {
+        let output = Command::new("/usr/bin/codesign")
+            .args(["-d", "--verbose=4"])
+            .arg(path)
+            .stdout(Stdio::null())
+            .output();
+        let Ok(output) = output else {
+            return false;
+        };
+        if !output.status.success() || output.stderr.len() > 64 * 1024 {
+            return false;
+        }
+        let details = String::from_utf8_lossy(&output.stderr);
+        official_updated_embedded_identity_metadata_matches(&details)
     }
-    let details = String::from_utf8_lossy(&output.stderr);
-    official_updated_embedded_identity_metadata_matches(&details)
+    // Windows 上 Science 没有可用的 embedded identity 等价物（未签名的小工具
+    // 很常见）。这里不做签名声明，只保留 PE 格式门 + 大小界 + SHA-256 快照绑定。
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
 }
 
+#[cfg(unix)]
 fn file_is_macho(path: &Path) -> bool {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
         .open(path);
     let Ok(mut file) = file else {
         return false;
@@ -381,6 +409,12 @@ fn file_is_macho(path: &Path) -> bool {
     )
 }
 
+/// Windows 上同一个格式门换成了 PE32/PE32+。
+#[cfg(not(unix))]
+fn file_is_macho(path: &Path) -> bool {
+    crate::platform::science_binary_format_ok(path)
+}
+
 fn official_updated_science_bin_for_home(
     home: &Path,
     verify_local_identity: bool,
@@ -395,7 +429,7 @@ fn official_updated_science_bin_for_home(
         return None;
     }
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     for directory in [home, &science_dir, &bin_dir] {
         let metadata = directory.symlink_metadata().ok()?;
         if !metadata.file_type().is_dir()
@@ -459,7 +493,7 @@ fn secure_runtime_snapshot_root(root: &Path) -> Result<PathBuf, String> {
         return Err("Science runtime snapshot 目录包含 symlink，已拒绝使用".into());
     }
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     let metadata = root
         .symlink_metadata()
         .map_err(|error| format!("读取 Science runtime snapshot 目录失败：{error}"))?;
@@ -482,7 +516,7 @@ fn official_updated_snapshot_from_process_paths(
         Err(error) => return Err(format!("读取 Science runtime snapshot 目录失败：{error}")),
     };
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if !snapshot_root.is_absolute()
         || metadata.file_type().is_symlink()
         || !metadata.file_type().is_dir()
@@ -569,7 +603,7 @@ fn official_updated_snapshot_for_home(
     )?;
     let mut source = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
         .open(&candidate)
         .map_err(|error| format!("打开 updater Science executable 失败：{error}"))?;
     let source_before = source
@@ -595,7 +629,7 @@ fn official_updated_snapshot_for_home(
             .write(true)
             .create_new(true)
             .mode(0o500)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
             .open(&temporary)
             .map_err(|error| format!("创建 Science runtime snapshot 临时文件失败：{error}"))?;
         let mut digest = Sha256::new();
@@ -686,7 +720,7 @@ fn science_executable_fingerprint(path: &Path) -> Option<ScienceExecutableFinger
     }
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
         .open(path)
         .ok()?;
     let before = file.metadata().ok()?;
@@ -728,7 +762,172 @@ fn science_executable_fingerprint(path: &Path) -> Option<ScienceExecutableFinger
 }
 
 fn cached_science_bin(data_dir: &Path) -> PathBuf {
-    data_dir.join("bin").join("claude-science")
+    data_dir.join("bin").join(SCIENCE_BIN_FILENAME)
+}
+
+/// 用户显式选定（或自动发现后固定）的 Science 可执行文件路径。
+/// 存在 CSSwitch 私有状态目录里，与 `config.json` 分开，避免影响配置 schema 迁移。
+pub(crate) const SCIENCE_BIN_OVERRIDE_FILE: &str = "science-bin.v1.json";
+
+#[derive(Serialize, Deserialize)]
+struct ScienceBinOverride {
+    schema_version: u32,
+    path: String,
+}
+
+fn science_bin_override_path() -> PathBuf {
+    config::default_dir().join(SCIENCE_BIN_OVERRIDE_FILE)
+}
+
+/// 读取用户固定下来的 Science 路径（已在本进程中再次做存在性与类型校验）。
+pub(crate) fn persisted_science_bin() -> Option<PathBuf> {
+    let raw = fs::read(science_bin_override_path()).ok()?;
+    if raw.len() > 8 * 1024 {
+        return None;
+    }
+    let parsed: ScienceBinOverride = serde_json::from_slice(&raw).ok()?;
+    if parsed.schema_version != 1 {
+        return None;
+    }
+    let path = PathBuf::from(parsed.path);
+    if !path.is_absolute() || !path.is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+/// 固定 Science 路径。调用方必须先完成 `--version` 与格式校验。
+pub(crate) fn set_persisted_science_bin(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("Science 路径必须是绝对路径".into());
+    }
+    if !path.is_file() {
+        return Err("Science 路径不存在或不是普通文件".into());
+    }
+    if crate::platform::path_is_reparse_or_link(path) {
+        return Err("Science 路径是符号链接/重解析点，已拒绝".into());
+    }
+    let dir = config::default_dir();
+    fs::create_dir_all(&dir).map_err(|error| format!("创建 CSSwitch 配置目录失败：{error}"))?;
+    let payload = serde_json::to_vec_pretty(&ScienceBinOverride {
+        schema_version: 1,
+        path: path.to_string_lossy().to_string(),
+    })
+    .map_err(|error| format!("序列化 Science 路径失败：{error}"))?;
+    let target = science_bin_override_path();
+    let temp = target.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
+            .open(&temp)
+            .map_err(|error| format!("写入 Science 路径失败：{error}"))?;
+        file.write_all(&payload)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("写入 Science 路径失败：{error}"))?;
+    }
+    if let Err(error) = fs::rename(&temp, &target) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("提交 Science 路径失败：{error}"));
+    }
+    Ok(())
+}
+
+/// 清理用户固定路径（供 UI“恢复自动发现”使用）。
+pub(crate) fn clear_persisted_science_bin() -> Result<(), String> {
+    match fs::remove_file(science_bin_override_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("删除 Science 路径记录失败：{error}")),
+    }
+}
+
+/// 对外暴露的版本探测（命令层只需要一个字符串）。
+pub(crate) fn safe_science_version_public(path: &Path) -> Option<String> {
+    safe_science_version(path)
+}
+
+/// 校验一个候选可执行文件：格式 + 版本 + 大小界。返回版本串。
+pub(crate) fn validate_science_binary_candidate(path: &Path) -> Result<String, String> {
+    if !is_executable_file(path) {
+        return Err("候选路径不是安全的绝对可执行文件（或位于链接路径下）".into());
+    }
+    let metadata = path
+        .metadata()
+        .map_err(|error| format!("读取候选文件失败：{error}"))?;
+    if !(MIN_SCIENCE_BINARY_SIZE..=MAX_SCIENCE_BINARY_SIZE).contains(&metadata.len()) {
+        return Err(format!(
+            "候选文件大小 {} 不在 Claude Science 的合理区间（1MB–512MB）",
+            metadata.len()
+        ));
+    }
+    if !crate::platform::science_binary_format_ok(path) {
+        return Err("候选文件不是本平台的可执行格式（Mach-O / PE）".into());
+    }
+    safe_science_version(path).ok_or_else(|| "候选文件未通过 `--version` 预检".to_string())
+}
+
+/// 当前平台上“已安装的 Claude Science 可执行文件”。
+///
+/// macOS 固定在 App bundle 内；Windows 由 `claude-science install` 放到
+/// `%LOCALAPPDATA%\Programs\ClaudeScience\`，也允许用户把它放在别处后通过
+/// CSSwitch 设置或 `SCIENCE_BIN` 指定。
+pub(crate) fn installed_science_bin() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from(SCIENCE_BIN);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(persisted) = persisted_science_bin() {
+            return persisted;
+        }
+        let candidates = installed_science_bin_candidates();
+        for candidate in &candidates {
+            if candidate.is_file() {
+                return candidate.clone();
+            }
+        }
+        // 都不存在时返回首选位置，让上层的报错指向用户该安装到的地方。
+        candidates
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| PathBuf::from(SCIENCE_BIN_FILENAME))
+    }
+}
+
+/// 仅供 Windows 测试：暴露候选发现顺序。
+#[cfg(all(test, windows))]
+pub(crate) fn test_science_bin_candidates() -> Vec<PathBuf> {
+    installed_science_bin_candidates()
+}
+
+/// Windows 上官方安装器与常见手动放置位置的候选顺序。
+#[cfg(not(target_os = "macos"))]
+fn installed_science_bin_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        candidates.push(local.join("Programs").join("ClaudeScience").join(SCIENCE_BIN_FILENAME));
+        candidates.push(local.join("Programs").join("Claude Science").join(SCIENCE_BIN_FILENAME));
+        candidates.push(local.join("ClaudeScience").join(SCIENCE_BIN_FILENAME));
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(
+            PathBuf::from(program_files)
+                .join("Claude Science")
+                .join(SCIENCE_BIN_FILENAME),
+        );
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(OFFICIAL_UPDATED_RUNTIME_RELATIVE),
+        );
+    }
+    candidates
 }
 
 fn create_science_version_output() -> Option<(fs::File, PathBuf)> {
@@ -743,7 +942,7 @@ fn create_science_version_output() -> Option<(fs::File, PathBuf)> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
             .open(&path)
         {
             Ok(file) => return Some((file, path)),
@@ -754,6 +953,7 @@ fn create_science_version_output() -> Option<(fs::File, PathBuf)> {
     None
 }
 
+#[cfg(unix)]
 fn anchored_child_exited(pid: u32) -> Result<bool, i32> {
     let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
     loop {
@@ -780,6 +980,7 @@ fn anchored_child_exited(pid: u32) -> Result<bool, i32> {
     }
 }
 
+#[cfg(unix)]
 fn kill_anchored_science_version_group(pid: u32, leader_exited: bool) -> bool {
     let Ok(pgid) = i32::try_from(pid) else {
         return false;
@@ -800,6 +1001,40 @@ fn kill_anchored_science_version_group(pid: u32, leader_exited: bool) -> bool {
     cfg!(target_os = "macos") && leader_exited && errno == Some(libc::EPERM)
 }
 
+/// Windows 上没有 POSIX 进程组与 `waitid(WNOWAIT)`，等价语义用
+/// “轮询 Child + 结束时杀掉整棵进程树”实现：仍然是超时即失败关闭，
+/// 且不把可能已产生副作用的子进程留在后台。
+#[cfg(not(unix))]
+fn wait_science_version_probe(mut child: Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                kill_process_tree(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// 用 `taskkill /T /F` 杀掉进程及其子进程（Windows 版 `kill(-pgid)`）。
+#[cfg(not(unix))]
+fn kill_process_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
 fn wait_science_version_probe(mut child: Child, timeout: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -844,25 +1079,28 @@ fn safe_science_version_with_timeout(path: &Path, timeout: Duration) -> Option<S
         let mut command = Command::new(path);
         command
             .arg("--version")
-            .env("HOME", sandbox_home())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::null())
-            .process_group(0);
-        // SAFETY: setrlimit is async-signal-safe and the closure touches no
-        // shared Rust state. The hard limit is inherited by descendants and
-        // prevents a malformed version command from filling TMPDIR.
-        unsafe {
-            command.pre_exec(|| {
-                let limit = libc::rlimit {
-                    rlim_cur: 1025 as libc::rlim_t,
-                    rlim_max: 1025 as libc::rlim_t,
-                };
-                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
+            .stderr(Stdio::null());
+        crate::platform::apply_isolated_home(&mut command, &sandbox_home());
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+            // SAFETY: setrlimit is async-signal-safe and the closure touches no
+            // shared Rust state. The hard limit is inherited by descendants and
+            // prevents a malformed version command from filling TMPDIR.
+            unsafe {
+                command.pre_exec(|| {
+                    let limit = libc::rlimit {
+                        rlim_cur: 1025 as libc::rlim_t,
+                        rlim_max: 1025 as libc::rlim_t,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
         }
         let child = command.spawn().ok()?;
         let status = wait_science_version_probe(child, timeout)?;
@@ -1063,7 +1301,7 @@ pub(crate) fn science_runtime_preflight(
         &data_dir,
         explicit.as_deref(),
         official_updated.as_deref(),
-        Path::new(SCIENCE_BIN),
+        &installed_science_bin(),
         version_cache,
     )
 }
@@ -1162,7 +1400,7 @@ pub(crate) fn select_science_runtime_cached(
         &data_dir,
         explicit.as_deref(),
         official_updated.as_deref(),
-        Path::new(SCIENCE_BIN),
+        &installed_science_bin(),
         choice,
         version_cache,
     )
@@ -1190,7 +1428,7 @@ fn runtime_probe_candidates(
             candidates.push(runtime);
         }
     }
-    let app = PathBuf::from(SCIENCE_BIN);
+    let app = installed_science_bin();
     if let Some(app) = runtime_identity(app, ScienceRuntimeSource::InstalledApp, version_cache) {
         candidates.push(app);
     }
@@ -1321,7 +1559,7 @@ fn loopback_port_accepts_tcp(port: u16) -> bool {
                         .write(true)
                         .create_new(true)
                         .mode(0o600)
-                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
                         .open(&temp)?;
                     file.write_all(&bytes)?;
                     file.sync_all()?;
@@ -1346,7 +1584,7 @@ fn loopback_port_accepts_tcp(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
 }
 
-fn parse_unique_listener_pid(stdout: &str) -> Option<u32> {
+pub(crate) fn parse_unique_listener_pid(stdout: &str) -> Option<u32> {
     let mut pids = stdout
         .lines()
         .map(str::trim)
@@ -1360,20 +1598,14 @@ fn parse_unique_listener_pid(stdout: &str) -> Option<u32> {
 }
 
 fn unique_listener_pid(port: u16) -> Option<u32> {
-    let listener = Command::new("/usr/sbin/lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
-        .output()
-        .ok()?;
-    if !listener.status.success() {
-        return None;
-    }
-    parse_unique_listener_pid(&String::from_utf8(listener.stdout).ok()?)
+    crate::platform::unique_listener_pid(port)
 }
 
 fn managed_launch_path() -> PathBuf {
     config::default_dir().join(MANAGED_LAUNCH_FILE)
 }
 
+#[cfg(unix)]
 fn process_start_identity(pid: u32) -> Option<String> {
     if pid <= 1 {
         return None;
@@ -1407,11 +1639,30 @@ fn process_start_identity(pid: u32) -> Option<String> {
     Some(identity.to_string())
 }
 
+/// Windows 上用进程创建时间（`GetProcessTimes`）作为启动身份，
+/// 与 macOS 的 `ps -o lstart=` 一样能识别 PID 复用。
+#[cfg(not(unix))]
+fn process_start_identity(pid: u32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    #[cfg(test)]
+    if std::env::var_os("CSSWITCH_TEST_PROCESS_START_DRIFT_PID")
+        .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+        == Some(pid)
+        && std::env::var_os("CSSWITCH_TEST_PROCESS_START_DRIFT_MARKER")
+            .is_some_and(|path| PathBuf::from(path).is_file())
+    {
+        return Some("win32-created:1".into());
+    }
+    crate::platform::process_start_identity(pid)
+}
+
 fn data_dir_identity() -> Option<(PathBuf, u64, u64)> {
     let data_dir = sandbox_data_dir().canonicalize().ok()?;
     let metadata = data_dir.symlink_metadata().ok()?;
     if !metadata.file_type().is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::platform::current_user_id()
         || metadata.permissions().mode() & 0o022 != 0
     {
         return None;
@@ -1509,7 +1760,7 @@ fn managed_launch_file_identity(metadata: &fs::Metadata) -> ManagedLaunchFileIde
 
 fn private_managed_launch_file(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_file()
-        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.uid() == crate::platform::current_user_id()
         && metadata.permissions().mode() & 0o077 == 0
         && metadata.len() > 0
         && metadata.len() <= MAX_MANAGED_LAUNCH_BYTES
@@ -1521,7 +1772,7 @@ fn read_managed_launch_snapshot_at(
     let parent = path.parent()?;
     let parent_metadata = parent.symlink_metadata().ok()?;
     if !parent_metadata.file_type().is_dir()
-        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.uid() != crate::platform::current_user_id()
         || parent_metadata.permissions().mode() & 0o022 != 0
     {
         return None;
@@ -1533,7 +1784,7 @@ fn read_managed_launch_snapshot_at(
     let expected_file = managed_launch_file_identity(&metadata);
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
         .open(path)
         .ok()?;
     let after = file.metadata().ok()?;
@@ -1597,14 +1848,14 @@ fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<()
         .symlink_metadata()
         .map_err(|_| "Science managed launch 记录目录不可用")?;
     if !parent_metadata.file_type().is_dir()
-        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.uid() != crate::platform::current_user_id()
         || parent_metadata.permissions().mode() & 0o022 != 0
     {
         return Err("Science managed launch 记录目录不安全".into());
     }
     if let Ok(metadata) = path.symlink_metadata() {
         if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.uid() != crate::platform::current_user_id()
             || metadata.permissions().mode() & 0o077 != 0
         {
             return Err("Science managed launch 记录不是安全私有普通文件".into());
@@ -1620,7 +1871,7 @@ fn write_managed_launch_record(record: &ScienceManagedLaunchRecord) -> Result<()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(crate::platform::NOFOLLOW_CLOEXEC)
             .open(&temp)
             .map_err(|_| "无法创建 Science managed launch 临时记录")?;
         file.write_all(&bytes)
@@ -1892,22 +2143,35 @@ fn clear_managed_launch_identity(
     Ok(())
 }
 
+/// 监听进程的可执行文件路径。
+///
+/// POSIX 上用 `lsof -d txt` 列出映射的文本文件（能识别被替换过的 binary）；
+/// Windows 上用 `QueryFullProcessImageNameW` 拿主模块路径，语义足够且不依赖
+/// 外部工具。两边返回的列表要么包含实际 executable，要么为空。
 fn process_text_paths(pid: u32) -> Option<Vec<PathBuf>> {
-    let pid_text = pid.to_string();
-    let text_files = Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-a", "-p", &pid_text, "-d", "txt", "-Fn"])
-        .output()
-        .ok()?;
-    if !text_files.status.success() {
-        return None;
+    #[cfg(unix)]
+    {
+        let pid_text = pid.to_string();
+        let text_files = Command::new("/usr/sbin/lsof")
+            .args(["-nP", "-a", "-p", &pid_text, "-d", "txt", "-Fn"])
+            .output()
+            .ok()?;
+        if !text_files.status.success() {
+            return None;
+        }
+        Some(
+            String::from_utf8_lossy(&text_files.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix('n'))
+                .filter_map(|path| Path::new(path).canonicalize().ok())
+                .collect(),
+        )
     }
-    Some(
-        String::from_utf8_lossy(&text_files.stdout)
-            .lines()
-            .filter_map(|line| line.strip_prefix('n'))
-            .filter_map(|path| Path::new(path).canonicalize().ok())
-            .collect(),
-    )
+    #[cfg(not(unix))]
+    {
+        let image = crate::platform::process_image_path(pid)?;
+        Some(vec![image.canonicalize().unwrap_or(image)])
+    }
 }
 
 fn listener_runtime_pid(port: u16, runtime: &ScienceRuntimeIdentity) -> Option<u32> {
@@ -1958,13 +2222,10 @@ pub(crate) fn sandbox_url(port: u16, runtime: &ScienceRuntimeIdentity) -> String
     let home = sandbox_home();
     let data_dir = sandbox_data_dir();
     if runtime.is_current() {
-        if let Ok(out) = Command::new(&runtime.path)
-            .arg("url")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .env("HOME", &home)
-            .output()
-        {
+        let mut command = Command::new(&runtime.path);
+        command.arg("url").arg("--data-dir").arg(&data_dir);
+        crate::platform::apply_isolated_home(&mut command, &home);
+        if let Ok(out) = command.output() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(url) = first_http_url(&s) {
                 return url;
@@ -1978,13 +2239,10 @@ fn runtime_status(runtime: &ScienceRuntimeIdentity) -> Option<bool> {
     if !runtime.is_current() {
         return None;
     }
-    let out = Command::new(&runtime.path)
-        .arg("status")
-        .arg("--data-dir")
-        .arg(sandbox_data_dir())
-        .env("HOME", sandbox_home())
-        .output()
-        .ok()?;
+    let mut command = Command::new(&runtime.path);
+    command.arg("status").arg("--data-dir").arg(sandbox_data_dir());
+    crate::platform::apply_isolated_home(&mut command, &sandbox_home());
+    let out = command.output().ok()?;
     // Some Science builds use a non-zero exit to mean "not running" while
     // still returning a valid {"running":false} payload. Accept only that
     // negative result; a non-zero positive or malformed response stays unknown.
@@ -2084,7 +2342,56 @@ pub(crate) fn sandbox_listener_matches_runtime(
     listener_uses_runtime(port, runtime)
 }
 
-/// Stop the sandbox Science process and clear the in-memory sandbox URL.
+/// 调用“停止”动作。macOS 走打包的 zsh 停止脚本（并保留其额外护栏），
+/// Windows 上直接调用 Science 自己的 `stop` 子命令——它依靠数据目录里的
+/// DPAPI 控制状态找到 daemon，不需要 shell。
+#[cfg(unix)]
+fn stop_science_daemon<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    runtime: &ScienceRuntimeIdentity,
+) -> Result<(), String> {
+    let Some(root) = asset_root(app) else {
+        return Err(
+            "定位不到资源根，取不到停止脚本，无法确认沙箱已停止（沙箱可能仍在运行）。".to_string(),
+        );
+    };
+    let stop = root.join("scripts/stop-science-sandbox.sh");
+    if !stop.is_file() {
+        return Err("找不到打包的停止脚本，无法确认沙箱已停止（沙箱可能仍在运行）。".to_string());
+    }
+    match Command::new("zsh")
+        .arg(&stop)
+        .env("SANDBOX_HOME", sandbox_home())
+        .env("SCIENCE_BIN", &runtime.path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("停止沙箱脚本非零退出（{:?}）。", status.code())),
+        Err(error) => Err(format!("调用停止沙箱脚本失败：{error}")),
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_science_daemon<R: Runtime>(
+    _app: &tauri::AppHandle<R>,
+    runtime: &ScienceRuntimeIdentity,
+) -> Result<(), String> {
+    let mut command = Command::new(&runtime.path);
+    command
+        .arg("stop")
+        .arg("--data-dir")
+        .arg(sandbox_data_dir())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::platform::apply_isolated_home(&mut command, &sandbox_home());
+    match command.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("Science stop 非零退出（{:?}）。", status.code())),
+        Err(error) => Err(format!("调用 Science stop 失败：{error}")),
+    }
+}
 ///
 /// Returns `Err` when the stop script is missing or exits non-zero, so callers
 /// can report that Science may not have stopped cleanly.
@@ -2158,34 +2465,9 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
         return Err("Science managed launch 身份在停止前发生变化；未调用 stop 或发送信号".into());
     }
     let mut err = None;
-    match asset_root(app) {
-        Some(root) => {
-            let stop = root.join("scripts/stop-science-sandbox.sh");
-            if stop.is_file() {
-                match Command::new("zsh")
-                    .arg(&stop)
-                    .env("SANDBOX_HOME", sandbox_home())
-                    .env("SCIENCE_BIN", &runtime.path)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    Ok(s) if s.success() => {}
-                    Ok(s) => err = Some(format!("停止沙箱脚本非零退出（{:?}）。", s.code())),
-                    Err(e) => err = Some(format!("调用停止沙箱脚本失败：{e}")),
-                }
-            } else {
-                err = Some(
-                    "找不到打包的停止脚本，无法确认沙箱已停止（沙箱可能仍在运行）。".to_string(),
-                );
-            }
-        }
-        None => {
-            err = Some(
-                "定位不到资源根，取不到停止脚本，无法确认沙箱已停止（沙箱可能仍在运行）。"
-                    .to_string(),
-            );
-        }
+    match stop_science_daemon(app, runtime) {
+        Ok(()) => {}
+        Err(message) => err = Some(message),
     }
     if err.is_none() && loopback_port_accepts_tcp(sandbox_port) {
         let pid = stop_token.record.listener_pid;
@@ -2197,7 +2479,7 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
             // both before and after CLI.
             // SAFETY: kill does not dereference pointers. PID > 1 and exact
             // listener identity were checked immediately above.
-            if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+            if !crate::platform::terminate_process(pid, false) {
                 err = Some("Science stop 返回成功但精确 daemon 无法接收 TERM。".into());
             } else {
                 for _ in 0..50 {
@@ -2209,7 +2491,7 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
                 if managed_launch_token_is_current(&stop_token, runtime) {
                     // SAFETY: the same launch token, including process-start
                     // identity, is revalidated after the TERM wait.
-                    let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    let _ = crate::platform::terminate_process(pid, true);
                     for _ in 0..20 {
                         if !loopback_port_accepts_tcp(sandbox_port) {
                             break;
@@ -2248,7 +2530,7 @@ pub(crate) fn stop_sandbox_with_launch_token<R: Runtime>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;

@@ -81,3 +81,8 @@ docs/*
 # Temporary Agent handoffs are local execution residue. Track only their policy.
 .agents/handoffs/*
 !.agents/handoffs/README.md
+
+# Windows 构建产物：staged sidecar 与打包输出
+desktop/src-tauri/binaries/
+dist/
+

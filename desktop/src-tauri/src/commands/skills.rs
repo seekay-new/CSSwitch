@@ -902,7 +902,7 @@ fn reveal_rejected() -> SkillManagerError {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc, Arc};

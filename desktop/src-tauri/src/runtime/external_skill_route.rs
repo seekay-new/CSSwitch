@@ -7,7 +7,7 @@ use csswitch_skill_install_core::MAX_IMPORT_ORIGIN_BYTES;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use crate::platform::OpenOptionsExt;
 
 pub(crate) const SKILL_NAME: &str = "csswitch-external-skill-tools";
 const IMPORT_ORIGIN_FILE: &str = ".import-origin";
@@ -233,7 +233,7 @@ fn read_regular_file_limited(path: &Path, limit: usize) -> Result<Option<Vec<u8>
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    options.custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK);
     let mut file = match options.open(path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
@@ -401,7 +401,7 @@ fn rename_no_replace(source: &Path, target: &Path) -> Result<(), String> {
     fs::rename(source, target).map_err(|e| format!("提交路由 Skill 失败：{e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;

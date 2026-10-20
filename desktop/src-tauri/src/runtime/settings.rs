@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use crate::platform::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const SSH_STUB_MARKER: &str = "# CSSwitch managed system SSH config bridge v1";
@@ -59,7 +59,7 @@ fn read_exact_v2_managed_stub(
         Err(_) => return Err("隔离 SSH 配置目录状态无法安全确认".into()),
     };
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if dir_metadata.file_type().is_symlink()
         || !dir_metadata.file_type().is_dir()
         || dir_metadata.uid() != uid
@@ -70,7 +70,7 @@ fn read_exact_v2_managed_stub(
     let config = ssh_dir.join("config");
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK)
         .open(&config)
     {
         Ok(file) => file,
@@ -255,7 +255,7 @@ pub(crate) fn prevalidate_sandbox_ssh_stub(
         Err(_) => return Err("隔离 SSH config 不是 CSSwitch 管理的安全入口".into()),
     };
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if dir_metadata.file_type().is_symlink()
         || !dir_metadata.file_type().is_dir()
         || dir_metadata.uid() != uid
@@ -266,7 +266,7 @@ pub(crate) fn prevalidate_sandbox_ssh_stub(
     let config = ssh_dir.join("config");
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK)
         .open(&config)
     {
         Ok(file) => file,
@@ -331,7 +331,7 @@ fn validate_managed_sandbox_ssh_stub_for_config(
     let dir_metadata = std::fs::symlink_metadata(&ssh_dir)
         .map_err(|_| "隔离 SSH 配置目录缺失，拒绝复用运行中的 Science")?;
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if !dir_metadata.file_type().is_dir()
         || dir_metadata.file_type().is_symlink()
         || dir_metadata.uid() != uid
@@ -342,7 +342,7 @@ fn validate_managed_sandbox_ssh_stub_for_config(
     let config = ssh_dir.join("config");
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK)
         .open(&config)
         .map_err(|_| "隔离 SSH config 缺失或不安全，拒绝复用运行中的 Science")?;
     let metadata = file.metadata().map_err(|_| "无法检查隔离 SSH config")?;
@@ -391,14 +391,14 @@ fn remove_managed_sandbox_ssh_stub_for_config(
         Err(error) => return Err(format!("检查隔离 SSH 配置目录失败：{error}")),
     };
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if !dir_metadata.file_type().is_dir() || dir_metadata.uid() != uid {
         return Err("隔离 SSH 配置目录不安全，拒绝撤销授权".into());
     }
     let config = ssh_dir.join("config");
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK)
         .open(&config)
     {
         Ok(file) => file,
@@ -439,7 +439,7 @@ pub(crate) fn validate_runtime_ports(proxy_port: u16, sandbox_port: u16) -> Resu
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 

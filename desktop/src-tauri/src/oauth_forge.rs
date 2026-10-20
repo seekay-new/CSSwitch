@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use crate::platform::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 
@@ -102,10 +103,7 @@ const VIRTUAL_ORG_MARKER_FILE: &str = "virtual-org.v1.json";
 
 // ---------- 随机与编码 ----------
 fn rand_bytes(n: usize) -> std::io::Result<Vec<u8>> {
-    let mut f = std::fs::File::open("/dev/urandom")?;
-    let mut b = vec![0u8; n];
-    f.read_exact(&mut b)?;
-    Ok(b)
+    crate::platform::random_bytes(n)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -257,7 +255,7 @@ fn chmod_best_effort(p: &Path, mode: u32) {
 
 fn current_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    unsafe { libc::geteuid() }
+    crate::platform::current_user_id()
 }
 
 fn marker_path(sandbox_root: &Path) -> Result<PathBuf, String> {
@@ -300,11 +298,66 @@ fn validate_marker_location(path: &Path, sandbox_root: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// 以“不跟随链接”的方式打开历史标记文件。
+///
+/// POSIX：在已被审计过的父目录 fd 上 `openat`，即使路径被 rename 也钉在同一目录。
+/// Windows：没有 dirfd 原语，改为“拒链接 + FILE_FLAG_OPEN_REPARSE_POINT”。
+#[cfg(unix)]
+fn open_marker_file(path: &Path) -> Result<Option<std::fs::File>, String> {
+    let Some(parent) = open_marker_parent_nofollow(path)? else {
+        return Ok(None);
+    };
+    let name = std::ffi::CString::new(VIRTUAL_ORG_MARKER_FILE).expect("static filename");
+    // SAFETY: parent 是自有目录 fd；name 以 NUL 结尾；标志要求只读且不跟随。
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            crate::platform::O_RDONLY | crate::platform::NOFOLLOW_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("读取 CSSwitch 历史标记失败：{error}"));
+    }
+    // SAFETY: fd 由 openat 唯一返回，所有权转移给 File。
+    Ok(Some(unsafe { std::fs::File::from_raw_fd(fd) }))
+}
+
+#[cfg(not(unix))]
+fn open_marker_file(path: &Path) -> Result<Option<std::fs::File>, String> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    if !parent.is_dir() {
+        // 私有状态目录还没被创建，等同于“没有标记”。
+        return Ok(None);
+    }
+    if crate::platform::path_is_reparse_or_link(parent)
+        || crate::platform::path_is_reparse_or_link(path)
+    {
+        return Err("CSSwitch 历史标记路径是链接/重解析点，已拒绝读取".into());
+    }
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::platform::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 CSSwitch 历史标记失败：{error}")),
+    }
+}
+
+#[cfg(unix)]
 fn open_marker_parent_nofollow(path: &Path) -> Result<Option<std::fs::File>, String> {
     let parent = path.parent().ok_or("虚拟组织标记无父目录")?;
     match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(crate::platform::O_DIRECTORY | crate::platform::NOFOLLOW_CLOEXEC)
         .open(parent)
     {
         Ok(file) => Ok(Some(file)),
@@ -343,28 +396,10 @@ fn ensure_marker_parent(path: &Path, sandbox_root: &Path) -> Result<(), String> 
 fn read_marker(resolved: &Path, sandbox_root: &Path) -> Result<MarkerRead, String> {
     let path = marker_path(sandbox_root)?;
     validate_marker_location(&path, sandbox_root)?;
-    let Some(parent) = open_marker_parent_nofollow(&path)? else {
-        return Ok(MarkerRead::Missing);
+    let mut file = match open_marker_file(&path)? {
+        Some(file) => file,
+        None => return Ok(MarkerRead::Missing),
     };
-    let name = std::ffi::CString::new(VIRTUAL_ORG_MARKER_FILE).expect("static filename");
-    // SAFETY: parent is an owned directory fd; name is NUL-terminated; flags
-    // request a read-only, non-following descriptor.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(MarkerRead::Missing);
-        }
-        return Err(format!("读取 CSSwitch 历史标记失败：{error}"));
-    }
-    // SAFETY: fd was returned uniquely by openat and is transferred to File.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let metadata = file
         .metadata()
         .map_err(|e| format!("检查 CSSwitch 历史标记失败：{e}"))?;
@@ -399,9 +434,7 @@ pub(crate) fn bootstrap_marker_for_intact_login(
     email: &str,
     sandbox_root: &Path,
 ) -> Result<(), String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("无 HOME 环境变量")?;
+    let home = crate::platform::real_user_home().ok_or("无 HOME / USERPROFILE 环境变量")?;
     let resolved = resolve_guarded(auth_dir, email, sandbox_root, &home.join(".claude-science"))?;
     let intact = read_intact_login(&resolved, email).ok_or("隔离虚拟登录不完整，不能补历史标记")?;
     match read_marker(&resolved, sandbox_root)? {
@@ -816,9 +849,7 @@ pub fn ensure_virtual_login(
     email: &str,
     sandbox_root: &Path,
 ) -> Result<(ForgeResult, LoginAction), EnsureVirtualLoginError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("无 HOME 环境变量")?;
+    let home = crate::platform::real_user_home().ok_or("无 HOME / USERPROFILE 环境变量")?;
     ensure_virtual_login_guarded(auth_dir, email, sandbox_root, &home.join(".claude-science"))
 }
 
@@ -892,9 +923,7 @@ pub(crate) fn restore_history_choice(
     sandbox_root: &Path,
     candidate: &HistoryOrgCandidate,
 ) -> Result<(ForgeResult, LoginAction), String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("无 HOME 环境变量")?;
+    let home = crate::platform::real_user_home().ok_or("无 HOME / USERPROFILE 环境变量")?;
     let resolved = resolve_guarded(auth_dir, email, sandbox_root, &home.join(".claude-science"))?;
     if !candidate_is_current(&resolved, candidate) {
         return Err("历史记录候选已变化，本次选择已作废；请重新点击一键开始".into());
@@ -909,8 +938,10 @@ pub(crate) fn restore_history_choice(
 /// 失效（旧版遗留 / 凭证损坏 / 已落登录页），重开也只会再落登录页，应改走「停沙箱 → 修复保
 /// org → 重启」。这样 0.2.0 的健康快捷路径不再把「健康但登录失效」当成可用（修 0.2.1 Bug2）。
 pub fn login_intact(auth_dir: &Path, email: &str, sandbox_root: &Path) -> bool {
-    match std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude-science")) {
-        Some(real) => login_intact_guarded(auth_dir, email, sandbox_root, &real),
+    match crate::platform::real_user_home() {
+        Some(home) => {
+            login_intact_guarded(auth_dir, email, sandbox_root, &home.join(".claude-science"))
+        }
         None => false,
     }
 }
@@ -929,7 +960,7 @@ fn login_intact_guarded(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};

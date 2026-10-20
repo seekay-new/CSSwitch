@@ -386,8 +386,8 @@ pub(crate) fn current_skill_install_bridge_key() -> Result<PathBuf, String> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != unsafe { libc::geteuid() }
+        use crate::platform::{MetadataExt, PermissionsExt};
+        if metadata.uid() != crate::platform::current_user_id()
             || metadata.permissions().mode() & 0o077 != 0
         {
             return Err("CSSwitch 私有 Skill bridge key file 权限非法".into());
@@ -422,7 +422,7 @@ fn write_skill_install_bridge_key(token: &str) -> Result<PathBuf, String> {
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use crate::platform::OpenOptionsExt;
             options.mode(0o600);
         }
         let mut file = options
@@ -559,7 +559,7 @@ fn explicit_gateway_bin_is_safe(path: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::platform::PermissionsExt;
         if metadata.permissions().mode() & 0o111 == 0 {
             return false;
         }
@@ -930,7 +930,7 @@ pub(crate) fn start_proxy_for<R: Runtime>(
     Ok((port, secret, ProxyAction::Restarted))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         configure_managed_proxy_command, find_gateway_in, formal_proxy_env, gateway_bin_path_from,
@@ -1406,7 +1406,7 @@ mod tests {
         fs::write(path, b"bin").unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use crate::platform::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
@@ -1523,7 +1523,7 @@ mod tests {
         assert!(name.starts_with("csswitch-gateway-"));
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use crate::platform::PermissionsExt;
             let mode = fs::metadata(&staged).unwrap().permissions().mode();
             assert_ne!(mode & 0o111, 0, "{} is not executable", staged.display());
         }

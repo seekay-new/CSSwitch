@@ -351,7 +351,7 @@ fn write_config_atomic(path: &Path, value: &Value) -> Result<(), String> {
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use crate::platform::OpenOptionsExt;
             options.mode(0o600);
         }
         let mut file = options
@@ -390,7 +390,7 @@ fn write_route_state_atomic(path: &Path, value: &Value) -> Result<(), String> {
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use crate::platform::OpenOptionsExt;
             options.mode(0o600);
         }
         let mut file = options
@@ -433,7 +433,7 @@ fn reject_symlink_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn route_state_is_persistent_versioned_and_secret_free() {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::platform::PermissionsExt;
 
         let root = temp_dir("route-state");
         assert!(!route_configuration_is_current(&root, "science-v1").unwrap());

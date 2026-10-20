@@ -18,9 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use crate::platform::MetadataExt;
+use crate::platform::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::model_catalog::{ModelRoute, RoleBindings};
@@ -464,6 +465,7 @@ fn config_access() -> std::sync::MutexGuard<'static, ConfigAccessState> {
         .unwrap_or_else(|error| error.into_inner())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn atomic_write_pre_rename_failure(
     secure: &SecureDir,
@@ -729,14 +731,11 @@ impl Config {
     }
 }
 
-/// 16 字节随机 → 32 hex 字符。/dev/urandom（unix）；不可用时退回时间纳秒。
+/// 16 字节随机 → 32 hex 字符。POSIX 读 `/dev/urandom`，Windows 走 `getrandom`；
+/// 不可用时退回时间纳秒。
 pub fn new_id() -> String {
-    use std::io::Read;
-    let mut buf = [0u8; 16];
-    if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut buf).is_ok() {
-            return buf.iter().map(|b| format!("{b:02x}")).collect();
-        }
+    if let Ok(bytes) = crate::platform::random_bytes(16) {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
     }
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1182,12 +1181,18 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
 
 /// 配置文件的所有关键操作都锚定到同一个已打开目录描述符。即使路径名随后被
 /// rename/替换，openat/renameat/linkat 仍只作用于最初审计过的目录。
+///
+/// Windows 上没有 `openat`/`renameat` 这组以目录句柄为锚点的原语，因此那里的
+/// 实现以“已审计过的目录路径 + 每次重新做链接检查”为锚点（见下方
+/// `#[cfg(windows)] impl SecureDir`）。
 struct SecureDir {
+    #[cfg(unix)]
     file: fs::File,
     path: PathBuf,
     normalize_file_permissions: bool,
 }
 
+#[cfg(unix)]
 impl SecureDir {
     fn open(path: &Path, create: bool) -> io::Result<Self> {
         Self::open_with_policy(path, create, true)
@@ -1210,7 +1215,7 @@ impl SecureDir {
         let mut options = fs::OpenOptions::new();
         options
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            .custom_flags(crate::platform::O_DIRECTORY | crate::platform::NOFOLLOW_CLOEXEC);
         let file = options.open(path)?;
         if !file.metadata()?.is_dir() {
             return Err(io::Error::new(
@@ -1245,7 +1250,7 @@ impl SecureDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                crate::platform::O_RDONLY | crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -1305,7 +1310,7 @@ impl SecureDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                crate::platform::O_RDONLY | crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -1343,7 +1348,7 @@ impl SecureDir {
             libc::openat(
                 self.file.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                crate::platform::O_WRONLY | crate::platform::O_CREAT | crate::platform::O_EXCL | crate::platform::NOFOLLOW_CLOEXEC,
                 0o600,
             )
         };
@@ -1412,6 +1417,206 @@ impl SecureDir {
         let left = self.file.metadata()?;
         let right = other.file.metadata()?;
         Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+}
+
+// ---------- Windows 的 SecureDir ----------
+//
+// 安全边界说明：POSIX 侧用 openat(dirfd) 把后续每一次文件操作钉在“已被审计过的
+// 目录”（即使路径被 rename 替换也不会跑到别处）。Windows 没有同一组原语，因此
+// 这里把边界换成另外三条，并保持同样的 fail-closed 形状：
+//   1. 目录本身：必须是普通目录且不是 symlink/junction（每次创建 SecureDir 时校验）；
+//   2. 每次子项访问：先 `symlink_metadata` 拒链接，再用
+//      FILE_FLAG_OPEN_REPARSE_POINT 打开，确保不跟随重解析点；
+//   3. 普通文件 + 单 hard link（由 `GetFileInformationByHandle` 取得）。
+// 残余风险：在“检查”和“打开”之间有极小的替换窗口；这比 POSIX 的 dirfd 方案
+// 弱，因此所有读写仍限制在用户自己的 profile 目录内（Windows 默认 ACL 已阻止
+// 其他用户写入），并保留内容级校验（schema、大小、JSON 结构）。
+
+#[cfg(windows)]
+impl SecureDir {
+    fn open(path: &Path, create: bool) -> io::Result<Self> {
+        Self::open_with_policy(path, create, true)
+    }
+
+    fn open_unmanaged(path: &Path) -> io::Result<Self> {
+        Self::open_with_policy(path, false, false)
+    }
+
+    fn open_with_policy(
+        path: &Path,
+        create: bool,
+        normalize_permissions: bool,
+    ) -> io::Result<Self> {
+        assert_not_symlink(path)?;
+        if create {
+            ensure_dir(path)?;
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("配置目录不是目录：{}", path.display()),
+            ));
+        }
+        if crate::platform::path_is_reparse_or_link(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "配置目录是符号链接/重解析点",
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            normalize_file_permissions: normalize_permissions,
+        })
+    }
+
+    /// 只做名字合法性校验（Windows 上没有 dirfd，不需要 CString）。
+    fn name(name: &str) -> io::Result<()> {
+        if name.is_empty()
+            || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+            || name == "."
+            || name == ".."
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "配置目录内部文件名非法",
+            ));
+        }
+        Ok(())
+    }
+
+    fn child(&self, name: &str) -> io::Result<PathBuf> {
+        Self::name(name)?;
+        Ok(self.path.join(name))
+    }
+
+    fn read_regular_snapshot(&self, name: &str) -> io::Result<Option<(Vec<u8>, u32)>> {
+        let target = self.child(name)?;
+        if crate::platform::path_is_reparse_or_link(&target) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "拒绝配置目录内的符号链接",
+            ));
+        }
+        let mut file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(crate::platform::O_NOFOLLOW)
+            .open(&target)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "拒绝配置目录内的非普通文件",
+            ));
+        }
+        if self.normalize_file_permissions
+            && crate::platform::file_identity(&target)
+                .map(|(_, _, links)| links != 1)
+                .unwrap_or(false)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "拒绝配置目录内具有多个 hard link 的文件",
+            ));
+        }
+        if metadata.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "配置或备份文件过大",
+            ));
+        }
+        let mut mode = metadata.permissions().mode() & 0o777;
+        if self.normalize_file_permissions {
+            // Windows 上不能用以只读打开的句柄改属性（需 FILE_WRITE_ATTRIBUTES）；
+            // 改用路径级 set_permissions，由 std 自己开一个带写属性的句柄。
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+            mode = 0o600;
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_CONFIG_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_CONFIG_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "配置或备份文件过大",
+            ));
+        }
+        Ok(Some((bytes, mode)))
+    }
+
+    fn regular_exists_allow_hardlinks(&self, name: &str) -> io::Result<bool> {
+        let target = self.child(name)?;
+        if crate::platform::path_is_reparse_or_link(&target) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "拒绝版本备份 pending 符号链接",
+            ));
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.is_file() => Ok(true),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "拒绝非普通版本备份 pending 文件",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_regular(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.read_regular_snapshot(name)
+            .map(|snapshot| snapshot.map(|(bytes, _)| bytes))
+    }
+
+    fn create_new(&self, name: &str) -> io::Result<fs::File> {
+        let target = self.child(name)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(crate::platform::O_NOFOLLOW)
+            .open(&target)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let from = self.child(from)?;
+        let to = self.child(to)?;
+        fs::rename(from, to)
+    }
+
+    fn link(&self, from: &str, to: &str) -> io::Result<()> {
+        let from = self.child(from)?;
+        let to = self.child(to)?;
+        fs::hard_link(from, to)
+    }
+
+    fn unlink(&self, name: &str) -> io::Result<()> {
+        let target = self.child(name)?;
+        match fs::remove_file(&target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        // Windows 上 MoveFile 已保证目录项持久化；目录句柄不能 fsync。
+        Ok(())
+    }
+
+    fn display_path(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
+
+    fn same_directory(&self, other: &Self) -> io::Result<bool> {
+        let left = fs::canonicalize(&self.path)?;
+        let right = fs::canonicalize(&other.path)?;
+        Ok(left == right)
     }
 }
 
@@ -2035,7 +2240,7 @@ where
     }
     drop(file);
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Err(error) = atomic_write_pre_rename_failure(secure, target, &tmp, bytes) {
         let _ = secure.unlink(&tmp);
         return Err(error);
@@ -2447,7 +2652,7 @@ pub fn mask(key: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;

@@ -184,6 +184,21 @@
           </section>
 
           <section class="app-page" data-page="settings" aria-label="设置">
+            <section class="surface settings-section" id="scienceBinSec" hidden aria-labelledby="scienceBinTitle">
+              <div class="section-heading">
+                <div><div class="section-kicker">CLAUDE SCIENCE</div><h2 id="scienceBinTitle">Claude Science 程序</h2><p>CSSwitch 需要一个可用的 Claude Science 可执行文件。Windows 上它可能不在默认安装位置，需要你指定一次。</p></div>
+                <span class="badge" id="scienceBinBadge">检查中</span>
+              </div>
+              <div class="permission-card">
+                <p id="scienceBinDetail">正在检查 Claude Science 程序…</p>
+                <div class="action-row">
+                  <button class="btn primary" id="scienceBinChooseBtn" type="button">选择程序…</button>
+                  <button class="btn" id="scienceBinClearBtn" type="button">恢复自动发现</button>
+                </div>
+                <p class="hint">选择后 CSSwitch 会校验文件格式、大小和 <code>--version</code>，通过后才记住路径。一键开始只会使用通过校验的程序。</p>
+              </div>
+            </section>
+
             <details class="surface adv tp-only" id="advSec" open>
               <summary><span><span class="section-kicker">RUNTIME</span><strong>运行设置</strong></span><span class="summary-hint">修改后按现有规则保存</span></summary>
               <div class="settings-grid">

@@ -781,7 +781,7 @@ pub(crate) fn probe_kind_for_model(model: &str) -> scratch::ProbeKind {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         build_get_config, build_list_templates, build_preset_sync_preview, clear_profile_key_inner,

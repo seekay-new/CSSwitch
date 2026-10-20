@@ -60,9 +60,21 @@
 
 ## 安装与启动
 
-需要一台 Apple Silicon Mac、已安装的 [Claude Science](https://claude.com/download)，以及可用的第三方模型 API Key 或 Codex 账号。
+需要一台 Apple Silicon Mac（或一台 Windows 10 1809+/11 x64），已安装的 [Claude Science](https://claude.com/download)，以及可用的第三方模型 API Key 或 Codex 账号。
 
-### 第一次安装
+### Windows x64
+
+Windows 版以便携包分发，无需管理员权限：
+
+1. 解压 `CSSwitch_0.8.4_x64-win-portable.zip`，双击 `CSSwitch.exe`。
+2. 确认已安装 Claude Science（官方安装器会放到 `%LOCALAPPDATA%\Programs\ClaudeScience\`）；
+   如果放在别处，到「设置 → Claude Science 程序」点「选择程序…」指定 `claude-science.exe`。
+3. 「模型连接」新增配置并「设为当前」，回首页保持「第三方模型」模式点「一键开始」。
+
+Windows 上与 macOS 的差异（Skill/MCP 管理、系统 SSH 复用暂不支持等）以及构建方式见
+[Windows 支持](docs/operations/windows.md)。
+
+### macOS
 
 1. 下载 [`CSSwitch_0.8.3_aarch64.dmg`](https://github.com/SuperJJ007/CSSwitch/releases/download/v0.8.3/CSSwitch_0.8.3_aarch64.dmg)，打开后将 CSSwitch 拖入「应用程序」。
 2. 确认电脑上已经安装 [Claude Science](https://claude.com/download)，然后打开 CSSwitch。
@@ -129,7 +141,7 @@ CSSwitch 当前聚焦于安全地把外部 Skill 接入隔离 Science，而不�
 
 ## 当前边界
 
-- 公开桌面包目前只支持 macOS Apple Silicon。
+- 公开桌面包：macOS Apple Silicon（dmg）与 Windows x64（便携 zip）。Windows 上 Skill/MCP 管理、系统 SSH 配置复用与多份历史 org 恢复暂不支持，会明确报错而不是降级静默执行。
 - 第三方模式不提供 Anthropic 账号权限，托管 MCP、目录连接器和部分云端能力可能不可用。
 - Codex 仍是默认关闭的实验能力，当前只支持单账号浏览器登录。
 - Rust Gateway 已随应用打包，不需要单独安装 Python runtime。

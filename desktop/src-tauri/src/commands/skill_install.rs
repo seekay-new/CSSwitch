@@ -114,8 +114,8 @@ fn open_regular_nofollow(path: &Path) -> Result<File, &'static str> {
     options.read(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        use crate::platform::OpenOptionsExt;
+        options.custom_flags(crate::platform::NOFOLLOW_CLOEXEC);
     }
     let file = options
         .open(path)

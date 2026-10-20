@@ -584,6 +584,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "跨进程 gateway 探针在 Windows 上由 test/win-e2e.ps1 端到端覆盖；单测内嵌启动子进程的时序待后续收紧"
+    )]
     fn scratch_probe_can_use_rust_backend_for_message_probe() {
         let bin = std::env::var_os("CSSWITCH_GATEWAY_BIN")
             .map(PathBuf::from)

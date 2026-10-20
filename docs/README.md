@@ -11,6 +11,7 @@
 
 - [开发](operations/development.md)
 - [自动测试](operations/testing.md)
+- [Windows 支持](operations/windows.md)：平台原语替换、构建环境、端到端验收与降级清单。
 - [真机验收](operations/real-machine-acceptance.md)
 - [发布](operations/release.md)
 - [升级与回滚](operations/upgrade-and-rollback.md)

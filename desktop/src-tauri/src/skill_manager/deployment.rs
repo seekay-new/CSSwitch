@@ -1580,8 +1580,8 @@ fn walk_runtime_payload(
         let stat = directory
             .child_stat(&os_cstring(&name)?)?
             .ok_or_else(|| deployment_conflict(Some(skill_id.clone())))?;
-        match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => {
+        match stat.st_mode & crate::platform::S_IFMT {
+            crate::platform::S_IFDIR => {
                 if scan.directory_count >= MAX_DIRECTORY_COUNT {
                     return Err(deployment_conflict(Some(skill_id.clone())));
                 }
@@ -1590,7 +1590,7 @@ fn walk_runtime_payload(
                 child.validate_owned()?;
                 walk_runtime_payload(&child, path, depth + 1, scan, skill_id)?;
             }
-            libc::S_IFREG => {
+            crate::platform::S_IFREG => {
                 if scan.files.len() >= MAX_FILE_COUNT || stat.st_size < 0 {
                     return Err(deployment_conflict(Some(skill_id.clone())));
                 }
@@ -1620,7 +1620,7 @@ mod tests {
     use super::*;
     use crate::skill_manager::store::{SkillManager, TEST_OPERATION_LOCK};
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::PermissionsExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 

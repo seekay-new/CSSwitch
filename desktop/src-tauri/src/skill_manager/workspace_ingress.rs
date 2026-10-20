@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use crate::platform::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};

@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use crate::platform::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use glob::glob;
@@ -243,7 +243,7 @@ fn checked_file_bytes(path: &Path, limit: u64, label: &str) -> Result<Option<Vec
     let mut options = OpenOptions::new();
     options
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC | crate::platform::O_NONBLOCK);
     let file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -251,7 +251,7 @@ fn checked_file_bytes(path: &Path, limit: u64, label: &str) -> Result<Option<Vec
     };
     let metadata = file.metadata().map_err(|_| format!("无法检查{label}"))?;
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_file()
         || metadata.len() > limit
@@ -340,7 +340,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::create_dir_all(parent).map_err(|_| "无法创建隔离 Science 状态目录".to_string())?;
     let parent_meta = fs::symlink_metadata(parent).map_err(|_| "无法检查隔离 Science 状态目录")?;
     // SAFETY: geteuid has no preconditions and does not dereference pointers.
-    let uid = unsafe { libc::geteuid() };
+    let uid = crate::platform::current_user_id();
     if parent_meta.file_type().is_symlink()
         || !parent_meta.is_dir()
         || parent_meta.uid() != uid
@@ -363,7 +363,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        .custom_flags(crate::platform::NOFOLLOW_CLOEXEC);
     let mut file = options.open(&tmp).map_err(|_| "无法创建隔离状态临时文件")?;
     let result = (|| -> Result<(), String> {
         file.write_all(bytes)
@@ -484,7 +484,7 @@ pub(crate) fn prevalidate_science_ssh_bridge(
         // This is deliberately a metadata-only check. The one-click transaction
         // must reject an authority that is statically non-writable before OAuth
         // or journal mutation without leaving a write-probe artifact behind.
-        let uid = unsafe { libc::geteuid() };
+        let uid = crate::platform::current_user_id();
         if let Ok(metadata) = fs::symlink_metadata(&data_dir) {
             if !metadata.file_type().is_dir()
                 || metadata.uid() != uid
