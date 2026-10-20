@@ -354,6 +354,9 @@ fn one_click_login_starts_isolated_science_on_windows() {
         ..Default::default()
     };
     crate::config::save_to(&config_dir, &cfg).expect("写入测试配置");
+    // 这条测试只验证一键开始本身；沙箱 doctor 会与 stop 抢沙箱安装锁，这里关掉。
+    std::env::set_var("CSSWITCH_DISABLE_SANDBOX_DOCTOR", "1");
+    let _doctor_off = DoctorDisabledGuard;
 
     let state = Arc::new(Mutex::new(super::AppState::default())) as super::SharedAppState;
     let lifecycle = Arc::new(crate::lifecycle::Lifecycle::new());
@@ -408,6 +411,14 @@ fn one_click_login_starts_isolated_science_on_windows() {
 struct ConfigDirGuard {
     config_dir: std::path::PathBuf,
     backup: Option<std::path::PathBuf>,
+}
+
+struct DoctorDisabledGuard;
+
+impl Drop for DoctorDisabledGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("CSSWITCH_DISABLE_SANDBOX_DOCTOR");
+    }
 }
 
 impl Drop for ConfigDirGuard {

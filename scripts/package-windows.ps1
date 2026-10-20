@@ -70,8 +70,8 @@ foreach ($path in $userData) {
         throw "输出目录里存在用户数据（$path）。请先备份并移走，再重新打包；脚本不会替你删除它。"
     }
 }
-if (Get-Process CSSwitch -ErrorAction SilentlyContinue) {
-    throw "CSSwitch 正在运行，无法替换可执行文件。先退出应用（托盘 → 退出）再重试。"
+if (Get-Process CSSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ($_.Path -like "$dest\*") }) {
+    throw "目标目录里的 CSSwitch 正在运行，无法替换可执行文件。先退出应用（托盘 → 退出）再重试；或者用 -OutRoot 输出到另一个目录。"
 }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 

@@ -500,6 +500,9 @@ fn wait_for_healthy_launch(
 /// 永远不会被安装。`sandbox doctor` 是 Science 自带的修复入口（无需管理员），
 /// 它会重新 prepare 并重新盖章。这里在后台跑一次，不阻塞 UI。
 fn schedule_sandbox_doctor_once(runtime: &ScienceRuntimeIdentity) {
+    if std::env::var_os("CSSWITCH_DISABLE_SANDBOX_DOCTOR").is_some() {
+        return;
+    }
     let marker = config::default_dir().join("sandbox-doctor.v1.json");
     let version = runtime.version.clone().unwrap_or_default();
     if marker
@@ -524,6 +527,8 @@ fn schedule_sandbox_doctor_once(runtime: &ScienceRuntimeIdentity) {
     let log_path = crate::runtime::system::log_path("sandbox-doctor.log");
     let home = sandbox_home();
     std::thread::spawn(move || {
+        // 给刚起来的 daemon 留出健康检查与身份记录的窗口，也避开它自己的 prepare。
+        std::thread::sleep(Duration::from_secs(15));
         if let Some(parent) = log_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
