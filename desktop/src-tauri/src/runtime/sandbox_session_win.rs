@@ -17,6 +17,7 @@
 
 use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tauri::Runtime;
@@ -532,6 +533,11 @@ fn schedule_sandbox_doctor_once(runtime: &ScienceRuntimeIdentity) {
         if let Some(parent) = log_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        // 仅在 MCP 环境确实未就绪时才做重活：healthy 的机器上这里几乎零成本。
+        if mcp_env_ready(&bin, &data_dir, &home) {
+            write_doctor_marker(&marker, &version);
+            return;
+        }
         let output = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -561,19 +567,103 @@ fn schedule_sandbox_doctor_once(runtime: &ScienceRuntimeIdentity) {
                     .status();
             }
         }
-        // 不管成功与否都记下版本：doctor 失败时不应每次启动都重跑它。
-        let payload = serde_json::json!({
-            "schema_version": 1,
-            "science_version": version,
-            "completed_at_ms": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|value| value.as_millis())
-                .unwrap_or(0),
-        });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
-            let _ = fs::write(&marker, bytes);
-        }
+        // doctor 会重新 prepare 并打印包含容器 SID 的 JSON；从里面取出 SID 后
+        // 给 conda 环境树补上（含继承），否则容器仍 spawn 不了环境里的解释器。
+        grant_container_access(&data_dir, &log_path);
+        write_doctor_marker(&marker, &version);
     });
+}
+
+/// `claude-science mcp-env-check --json` 是否认为 MCP 环境已就绪。
+fn mcp_env_ready(bin: &Path, data_dir: &Path, home: &Path) -> bool {
+    let mut command = Command::new(bin);
+    command
+        .arg("mcp-env-check")
+        .arg("--json")
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdin(Stdio::null());
+    crate::platform::apply_isolated_home(&mut command, home);
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    !text.contains("NOT READY") && !text.contains("NOT-READY")
+}
+
+fn write_doctor_marker(marker: &Path, version: &str) {
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "science_version": version,
+        "completed_at_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or(0),
+    });
+    if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
+        let _ = fs::write(marker, bytes);
+    }
+}
+
+/// 从 `sandbox doctor` 的输出里取出所有 AppContainer SID，并给 conda 环境树补上
+/// 读/执行权限（带继承）。
+///
+/// 背景：Windows 沙箱是 AppContainer。Science 只在 `prepare` 阶段给 ro-root 打
+/// 容器 SID 的**非继承** ACE；而 `claude-science-mcp` 环境往往在盖章之后才创建，
+/// 于是容器 spawn 环境内的 `python.exe`/`node.exe` 直接 `拒绝访问 (0x80070005)`，
+/// conda 自检 exit 113，声明包永远不会安装。
+fn grant_container_access(data_dir: &Path, log_path: &Path) {
+    let Ok(text) = fs::read_to_string(log_path) else {
+        return;
+    };
+    // 只看本次追加的尾部：SID 在最近一次 doctor 的 JSON 里。
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(200_000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut sids: Vec<String> = Vec::new();
+    let mut rest = tail.as_str();
+    while let Some(index) = rest.find("\"sid\":\"S-1-15-") {
+        let after = &rest[index + 8..];
+        if let Some(end) = after.find('"') {
+            let sid = &after[..end];
+            if !sids.iter().any(|existing| existing == sid) {
+                sids.push(sid.to_string());
+            }
+            rest = &after[end..];
+        } else {
+            break;
+        }
+    }
+    if sids.is_empty() {
+        return;
+    }
+    // 容器需要两份权限：包 SID（执行主体）与能力 SID（ro-root 盖章用的那个），
+    // 另外把 ALL APPLICATION PACKAGES 也带上（Science 自己的 shim 注释里就是这么说的）。
+    sids.push("S-1-15-2-1".to_string());
+    for relative in ["conda\\envs", "conda\\pkgs", "runtime", "sbx-bind-src"] {
+        let target = data_dir.join(relative);
+        if !target.is_dir() {
+            continue;
+        }
+        for sid in &sids {
+            let _ = Command::new("icacls")
+                .arg(&target)
+                .arg("/grant")
+                .arg(format!("*{sid}:(OI)(CI)RX"))
+                .arg("/T")
+                .arg("/C")
+                .arg("/Q")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
 }
 
 fn write_launch_journal(profile_id: &str) -> Result<(), String> {    let dir = config::default_dir();
