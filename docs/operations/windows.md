@@ -12,14 +12,20 @@ Claude Science 接到你自己的模型 API，并且保留 macOS 版那套 fail-
 ## 1. 目录与交付物
 
 ```
-dist\CSSwitch_0.8.4_x64-win-portable\
-  CSSwitch.exe            Tauri 桌面程序
-  csswitch-gateway.exe    Rust 本地 Gateway（sidecar）
-  WebView2Loader.dll      windows-gnu 构建动态链接的 WebView2 加载器
-  scripts\ docs\          诊断脚本与文档
+C:\software\Claudescience\
+  Claude-Science-0.1.67.exe     Claude Science 本体（CSSwitch 只读它）
+  release\
+    CSSwitch-0.8.4-win-x64\      交付目录：双击 CSSwitch.exe
+      CSSwitch.exe               Tauri 桌面程序
+      csswitch-gateway.exe       Rust 本地 Gateway（sidecar）
+      WebView2Loader.dll         windows-gnu 构建动态链接的 WebView2 加载器
+      scripts\ docs\ ...
+    CSSwitch-0.8.4-win-x64.zip   同内容压缩包
+  CSSwitch-0.8.4\               源码仓库（git）
+  _dev\                         开发过程产物（日志/备份/中间构建/辅助脚本，可整体删除）
 ```
 
-重新生成：
+重新生成交付包（输出到 `dist\`，或用 `-OutRoot` 直接输出到别处）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
