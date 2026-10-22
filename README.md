@@ -1,4 +1,4 @@
-> **这是 Windows x64 移植分支（非官方）。**
+> **这是 CSSwitch Windows x64 移植分支（蓝色大肥鱼辅助开发）。**
 > 下载：[最新 Release](https://github.com/seekay-new/CSSwitch/releases/latest) ·
 > 能做什么/不支持什么：[功能现状（Windows x64）](#功能现状windows-x64) ·
 > 构建与验收：[docs/operations/windows.md](docs/operations/windows.md)
@@ -150,6 +150,13 @@ CSSwitch 当前聚焦于安全地把外部 Skill 接入隔离 Science，而不�
 - CSSwitch 不下载或自动升级 Claude Science；新启动会优先采用本机官方 updater 已下载并通过本地身份校验的 runtime snapshot，否则使用当前安装的官方 App。
 
 ## 功能现状（Windows x64）
+### 怎么用
+1. 先装好ClaudeScience
+2. 安装本项目后解压，点解CSSwitch.exe即可打开
+3. 打开后点击“设置”，在“Claude Science 程序”选项卡中点击“选择程序”，再选择你“Claude-Science-[版本号].exe”的安装路径
+4. 回到“模型链接”，点击“新建配置”，配置好后就点“一键开始”
+5. **首次打开ClaudeScience必须开梯子，程序会自动安装conda、pyhton、r、claude-mcp等包，没有梯子无法安装claude-mcp**
+
 
 Windows 版与 macOS 版共用同一套源码与提交历史，但**可用范围不同**。下面按“可验证程度”分三档，不把未验证的东西写成已支持。
 
@@ -176,6 +183,8 @@ Windows 版与 macOS 版共用同一套源码与提交历史，但**可用范围
 
 ### ❌ 未实现 / 明确不支持（Windows）
 
+> 简单来说目前只实现了接api功能，其他都没完善
+
 | 项 | 现状 |
 | --- | --- |
 | Skill 的 GitHub 安装与 OPERON attach/detach 全链路 | 不提供。依赖 POSIX `openat` 原子 store；相关内部模块（`skill_manager/*`）当前未接入构建 |
@@ -197,18 +206,5 @@ Windows 版与 macOS 版共用同一套源码与提交历史，但**可用范围
 
 升级、回滚和已知限制见[项目文档](./docs/README.md)。问题反馈请使用 [GitHub Issues](https://github.com/SuperJJ007/CSSwitch/issues)。
 
-## 开发
-
-```bash
-cd desktop
-npm install
-npm run tauri dev
-```
-
-完整检查：
-
-```bash
-bash test/run_all.sh
-```
 
 [更新日志](./CHANGELOG.md) · [开发与测试](./docs/operations/development.md) · [发布证据](./docs/evidence/releases/README.md)
