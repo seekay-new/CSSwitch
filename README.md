@@ -1,3 +1,11 @@
+> **这是 Windows x64 移植分支（非官方）。**
+> 下载：[最新 Release](https://github.com/seekay-new/CSSwitch/releases/latest) ·
+> 能做什么/不支持什么：[功能现状（Windows x64）](#功能现状windows-x64) ·
+> 构建与验收：[docs/operations/windows.md](docs/operations/windows.md)
+>
+> 上游项目：[SuperJJ007/CSSwitch](https://github.com/SuperJJ007/CSSwitch)（MIT，见 [NOTICE.md](NOTICE.md)）。
+> 本分支的 `main` 与上游保持一致，Windows 相关改动都在 `windows-x64` 分支。
+
 <p align="center">
   <img src="desktop/src-tauri/icons/icon.png" alt="CSSwitch" width="112">
 </p>
