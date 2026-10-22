@@ -74,17 +74,69 @@ fn stage_gateway_sidecar() {
         staged_name.push_str(".exe");
     }
     let staged = out_dir.join(staged_name);
+
+    // 关键：gateway 源码没变且已 stage 过时，连嵌套构建都不做。
+    //
+    // 原因：`binaries/csswitch-gateway-<target>.exe` 是 tauri.conf.json 的 externalBin 输入，
+    // tauri-build 会对它发 `rerun-if-changed`。嵌套 `cargo build` 每次产出的 PE 头部可能
+    // 带不同时间戳，重写该文件就会被认定为“输入变了”，进而逼着整个 desktop crate 重编，
+    // 形成每次 `cargo build --release` 都要几十秒的循环。
+    if gateway_is_fresh(&staged, &gateway_dir) {
+        return;
+    }
+
+    let status = command.status();
+    if !matches!(status, Ok(s) if s.success()) {
+        panic!("failed to build csswitch-gateway sidecar for target {target}");
+    }
+
     copy_executable(&built, &staged);
 }
 
+/// `staged` 是否比 gateway 的所有构建输入都新（mtime 语义，与 make 一致）。
+fn gateway_is_fresh(staged: &Path, gateway_dir: &Path) -> bool {
+    let Ok(staged_time) = std::fs::metadata(staged).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    let inputs = [gateway_dir.join("Cargo.toml"), gateway_dir.join("src")];
+    !newer_than(&inputs, staged_time)
+}
+
+/// `roots` 下是否存在比 `reference` 更新的文件（目录会递归）。
+fn newer_than(roots: &[PathBuf], reference: std::time::SystemTime) -> bool {
+    for root in roots {
+        let Ok(metadata) = std::fs::metadata(root) else {
+            continue;
+        };
+        if let Ok(time) = metadata.modified() {
+            if time > reference {
+                return true;
+            }
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        if newer_than(&children, reference) {
+            return true;
+        }
+    }
+    false
+}
+
 fn copy_executable(src: &Path, dst: &Path) {
-    std::fs::copy(src, dst).unwrap_or_else(|e| {
+    // 内容一致时不重写（见 copy_if_changed 的注释：避免 build.rs 自触发循环）。
+    copy_if_changed(src, dst);
+    if !dst.is_file() {
         panic!(
-            "failed to stage csswitch-gateway sidecar from {} to {}: {e}",
+            "failed to stage csswitch-gateway sidecar from {} to {}",
             src.display(),
             dst.display()
-        )
-    });
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -128,12 +180,12 @@ fn stage_windows_webview2_loader() {
     };
     // OUT_DIR = target/<profile>/build/<pkg>-<hash>/out → target/<profile>
     if let Some(profile_dir) = out_dir.ancestors().nth(3) {
-        let _ = std::fs::copy(&source, profile_dir.join("WebView2Loader.dll"));
+        copy_if_changed(&source, &profile_dir.join("WebView2Loader.dll"));
     }
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let binaries = PathBuf::from(manifest_dir).join("binaries");
         let _ = std::fs::create_dir_all(&binaries);
-        let _ = std::fs::copy(&source, binaries.join("WebView2Loader.dll"));
+        copy_if_changed(&source, &binaries.join("WebView2Loader.dll"));
     }
 }
 
@@ -174,6 +226,36 @@ fn locate_webview2_loader() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 内容不同才写，且写失败不中止（返回是否写入）。
+fn write_if_different(path: &Path, bytes: &[u8]) -> bool {
+    if let Ok(existing) = std::fs::read(path) {
+        if existing == bytes {
+            return true;
+        }
+    }
+    std::fs::write(path, bytes).is_ok()
+}
+
+/// 只有内容真的变了才覆盖目标文件。
+///
+/// 重要：这两个目标文件（`binaries/WebView2Loader.dll`、`binaries/csswitch-gateway-<target>.exe`）
+/// 同时是 `tauri.conf.json` 的 resources / externalBin 输入。tiabuild 会为它们发出
+/// `rerun-if-changed`，所以如果 build.rs 每次构建都无条件重写它们，就会形成
+/// “build.rs 被重跑 → 重写文件 → 下次构建又看到它变了 → 再重跑”的循环，
+/// 表现为每次 `cargo build --release` 都要重新编译整个 crate（几十秒）。
+fn copy_if_changed(src: &Path, dst: &Path) {
+    if let (Ok(source), Ok(target)) = (std::fs::metadata(src), std::fs::metadata(dst)) {
+        if source.len() == target.len() {
+            if let (Ok(left), Ok(right)) = (std::fs::read(src), std::fs::read(dst)) {
+                if left == right {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = std::fs::copy(src, dst);
 }
 
 /// 在 windows-gnu 工具链上嵌入应用清单（manifest）。///
@@ -223,12 +305,10 @@ fn embed_windows_comctl32_manifest() {
 </assembly>
 "#;
 
-    if std::fs::write(&manifest, MANIFEST).is_err() {
-        return;
+    if !write_if_different(&manifest, MANIFEST.as_bytes()) {
+        // 写不进去也不致命：下面 windres 会因为缺文件而失败，从而走 warning 分支。
     }
-    if std::fs::write(&rc, "1 24 \"csswitch-app.manifest\"\n").is_err() {
-        return;
-    }
+    write_if_different(&rc, b"1 24 \"csswitch-app.manifest\"\n");
 
     let windres = local_windres();
     let Some(windres) = windres else {
@@ -255,7 +335,11 @@ fn embed_windows_comctl32_manifest() {
     // 带有 tauri-build 自己的清单，ld 只会打印一条
     // ".rsrc merge failure: multiple non-default manifests" 警告，产物仍正确。
     println!("cargo:rustc-link-arg={}", obj.display());
-    println!("cargo:rerun-if-changed={}", rc.display());
+    // 注意：这里**不能**对 `csswitch-app.rc` / `.manifest` 发 rerun-if-changed——
+    // 它们位于 OUT_DIR、由本脚本生成，一旦被当成输入就会形成
+    // “build.rs 重跑 → 重写文件 → 下次说它变了 → 再重跑”的循环，
+    // 表现为每次 `cargo build --release` 都要重编整个 crate（约 40 秒）。
+    // 清单内容变化依赖 build.rs 本身被重编，天然会被检测到。
 }
 
 /// 找 windres：优先显式环境变量，其次 PATH，最后常见的 MinGW 安装位置

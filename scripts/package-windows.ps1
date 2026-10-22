@@ -24,6 +24,37 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $OutRoot) { $OutRoot = Join-Path $repo "dist" }
 
+# 自己准备构建环境：不依赖调用者已经 dot-source 过某个脚本。
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+}
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "找不到 cargo：请先安装 Rust（rustup，x86_64-pc-windows-gnu），详见 docs/operations/windows.md"
+}
+if (-not (Get-Command gcc.exe -ErrorAction SilentlyContinue)) {
+    $candidates = @()
+    if ($env:CSSWITCH_MINGW_BIN) { $candidates += $env:CSSWITCH_MINGW_BIN }
+    if ($env:W64DEVKIT_HOME) { $candidates += (Join-Path $env:W64DEVKIT_HOME 'w64devkit\bin'), (Join-Path $env:W64DEVKIT_HOME 'bin') }
+    $candidates += @(
+        (Join-Path $env:ProgramFiles 'w64devkit\w64devkit\bin'),
+        (Join-Path $env:ProgramFiles 'w64devkit\bin'),
+        'C:\msys64\mingw64\bin'
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path (Join-Path $candidate 'gcc.exe'))) {
+            $env:PATH = "$candidate;$env:PATH"
+            break
+        }
+    }
+}
+if (-not (Get-Command gcc.exe -ErrorAction SilentlyContinue)) {
+    throw "找不到 gcc.exe：windows-gnu 构建需要 MinGW-w64（可用环境变量 CSSWITCH_MINGW_BIN / W64DEVKIT_HOME 指向其 bin 目录）"
+}
+# 保持与已验证环境一致，并且让指纹稳定：cc/ring 的构建脚本会监听 CC/AR，
+# 时而设置时而不设置会导致重复重建（增量缓存失效）。
+$env:CC = "gcc"
+$env:AR = "ar"
+
 $tauriDir = Join-Path $repo "desktop\src-tauri"
 $version = (Select-String -Path (Join-Path $tauriDir "tauri.conf.json") -Pattern '"version":\s*"([^"]+)"').Matches[0].Groups[1].Value
 $targetProfile = "release"
