@@ -78,7 +78,7 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item $appExe (Join-Path $dest "CSSwitch.exe")
 Copy-Item $gatewayExe (Join-Path $dest "csswitch-gateway.exe")
 Copy-Item $loader (Join-Path $dest "WebView2Loader.dll")
-foreach ($extra in @("LICENSE", "README.md", "CHANGELOG.md")) {
+foreach ($extra in @("LICENSE", "NOTICE.md", "README.md", "CHANGELOG.md")) {
     $path = Join-Path $repo $extra
     if (Test-Path -LiteralPath $path) { Copy-Item $path (Join-Path $dest $extra) }
 }

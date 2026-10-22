@@ -39,8 +39,9 @@ curl.exe -sSL -o "$env:TEMP\rustup-init.exe" https://static.rust-lang.org/rustup
 & "$env:TEMP\rustup-init.exe" -y --profile minimal --default-toolchain stable-x86_64-pc-windows-gnu --no-modify-path
 
 # 2) C 编译器 + binutils（ring/rustls 需要；提供 dlltool/ld/windres）
-#    解压 w64devkit 到 C:\software\w64devkit，然后：
-$env:PATH = "C:\software\w64devkit\w64devkit\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+#    下载 w64devkit 并解压（例如 C:\tools\w64devkit），然后：
+$env:CSSWITCH_MINGW_BIN = "C:\tools\w64devkit\w64devkit\bin"
+$env:PATH = "$env:CSSWITCH_MINGW_BIN;$env:USERPROFILE\.cargo\bin;$env:PATH"
 $env:CC = "gcc"; $env:AR = "ar"
 ```
 

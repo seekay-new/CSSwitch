@@ -64,6 +64,8 @@
 
 ### Windows x64
 
+> 这是 [SuperJJ007/CSSwitch](https://github.com/SuperJJ007/CSSwitch) 的**非官方 Windows 移植**（MIT，见 [NOTICE.md](./NOTICE.md)）。
+
 Windows 版以便携包分发，无需管理员权限：
 
 1. 解压 `CSSwitch_0.8.4_x64-win-portable.zip`，双击 `CSSwitch.exe`。

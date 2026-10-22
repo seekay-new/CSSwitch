@@ -258,7 +258,8 @@ fn embed_windows_comctl32_manifest() {
     println!("cargo:rerun-if-changed={}", rc.display());
 }
 
-/// 找 windres：优先显式环境变量，其次 PATH，最后 MinGW 常见安装位置。
+/// 找 windres：优先显式环境变量，其次 PATH，最后常见的 MinGW 安装位置
+/// （自建环境可按需设置 `WINDRES`，不必改代码）。
 fn local_windres() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("WINDRES") {
         let path = PathBuf::from(explicit);
@@ -270,14 +271,19 @@ fn local_windres() -> Option<PathBuf> {
     if matches!(&from_path, Ok(output) if output.status.success()) {
         return Some(PathBuf::from("windres.exe"));
     }
-    for candidate in [
-        r"C:\software\w64devkit\w64devkit\bin\windres.exe",
-        r"C:\msys64\mingw64\bin\windres.exe",
-    ] {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return Some(path);
-        }
+    // 常见位置仅作便利候选；不存在就跳过。
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for base in [
+        std::env::var_os("W64DEVKIT_HOME").map(PathBuf::from),
+        std::env::var_os("ProgramFiles").map(|value| PathBuf::from(value).join("w64devkit")),
+        std::env::var_os("SystemDrive").map(|value| PathBuf::from(value).join("msys64")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        candidates.push(base.join("w64devkit").join("bin").join("windres.exe"));
+        candidates.push(base.join("bin").join("windres.exe"));
+        candidates.push(base.join("mingw64").join("bin").join("windres.exe"));
     }
-    None
+    candidates.into_iter().find(|path| path.is_file())
 }

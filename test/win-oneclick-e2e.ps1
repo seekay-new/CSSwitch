@@ -31,12 +31,16 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 
 # windows-gnu 需要 C 编译器（ring/rustls 的 C 源码）与 binutils。
 if (-not (Get-Command gcc.exe -ErrorAction SilentlyContinue)) {
-    foreach ($candidate in @(
-            "C:\software\w64devkit\w64devkit\bin",
-            "C:\msys64\mingw64\bin",
-            "C:\mingw64\bin"
-        )) {
-        if (Test-Path (Join-Path $candidate "gcc.exe")) {
+    $candidates = @()
+    if ($env:CSSWITCH_MINGW_BIN) { $candidates += $env:CSSWITCH_MINGW_BIN }
+    if ($env:W64DEVKIT_HOME) { $candidates += (Join-Path $env:W64DEVKIT_HOME 'w64devkit\bin'), (Join-Path $env:W64DEVKIT_HOME 'bin') }
+    $candidates += @(
+        (Join-Path $env:ProgramFiles 'w64devkit\w64devkit\bin'),
+        (Join-Path $env:ProgramFiles 'w64devkit\bin'),
+        'C:\msys64\mingw64\bin'
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path (Join-Path $candidate 'gcc.exe'))) {
             $env:PATH = "$candidate;$env:PATH"
             break
         }
