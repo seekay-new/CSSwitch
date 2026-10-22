@@ -44,6 +44,16 @@ NSIS/MSI 安装器。完整矩阵见 README 的「功能现状（Windows x64）�
 
 ## 校验
 
-```powershell
-Get-FileHash CSSwitch-0.8.4-win-x64.zip -Algorithm SHA256
 ```
+SHA-256: DA16AA664FF93CC54AD6DC6574512A05FA7D538796BE8B3B08D4D0910ACD8BFE
+文件:    CSSwitch_0.8.4_x64-win-portable.zip (15.98 MB)
+```
+
+```powershell
+Get-FileHash CSSwitch_0.8.4_x64-win-portable.zip -Algorithm SHA256
+```
+
+## 源码位置
+
+Windows 改动在 `windows-x64` 分支；`main` 与上游同步。
+构建与验收：`docs/operations/windows.md`；发布流程：`docs/operations/publish.md`。
